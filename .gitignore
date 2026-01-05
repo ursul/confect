@@ -1,0 +1,8 @@
+# Project
+/target
+
+# IDE
+/.idea
+
+# AI
+/.claude
