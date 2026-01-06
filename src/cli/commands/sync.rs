@@ -16,6 +16,25 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
     // Refresh files from system to repository
     let updated = tracker.refresh_all()?;
     if updated.is_empty() {
+        if !no_push && repo.has_remote("origin")? {
+            println!(
+                "{} No local changes to commit",
+                style("[2/4]").bold().dim()
+            );
+            println!(
+                "{} Pushing to remote...",
+                style("[3/4]").bold().dim()
+            );
+            repo.push("origin")?;
+            println!("{} Pushed to origin", style("✓").green());
+            println!();
+            println!(
+                "{} Sync completed successfully!",
+                style("✓").green().bold()
+            );
+            return Ok(());
+        }
+
         return Err(ConfectError::NoChanges);
     }
 

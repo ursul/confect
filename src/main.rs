@@ -16,8 +16,8 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { path, remote, host } => {
-            commands::run_init(path, remote, host)?;
+        Commands::Init { path, system, remote, host } => {
+            commands::run_init(path, system, remote, host)?;
         }
 
         Commands::Add {

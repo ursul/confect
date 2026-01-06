@@ -139,8 +139,15 @@ impl Config {
         Ok(config)
     }
 
-    /// Get the default repository path
+    /// Get the default repository path (XDG-compatible)
     pub fn default_repo_path() -> PathBuf {
+        dirs::data_dir()
+            .map(|d| d.join("confect"))
+            .unwrap_or_else(|| PathBuf::from("/var/lib/confect"))
+    }
+
+    /// Get the system-wide repository path
+    pub fn system_repo_path() -> PathBuf {
         PathBuf::from("/var/lib/confect")
     }
 
@@ -197,19 +204,6 @@ impl Default for RepoConfig {
 }
 
 impl RepoConfig {
-    /// Load from repository path
-    pub fn load(repo_path: &Path) -> Result<Self> {
-        let config_path = repo_path.join(".confect").join("config.toml");
-
-        if !config_path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content = fs::read_to_string(&config_path)?;
-        let config: RepoConfig = toml::from_str(&content)?;
-        Ok(config)
-    }
-
     /// Save to repository path
     pub fn save(&self, repo_path: &Path) -> Result<()> {
         let confect_dir = repo_path.join(".confect");

@@ -5,8 +5,11 @@ edition = "2021"
 rust-version = "1.75"
 description = "CLI tool for managing system configuration files with Git"
 license = "MIT"
-repository = "https://github.com/yourusername/confect"
-keywords = ["config", "git", "backup", "sysadmin"]
+repository = "https://github.com/ursul/confect"
+homepage = "https://ursul.github.io/confect"
+documentation = "https://ursul.github.io/confect"
+readme = "README.md"
+keywords = ["config", "git", "backup", "dotfiles", "sysadmin"]
 categories = ["command-line-utilities", "config"]
 
 [dependencies]

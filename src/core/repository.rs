@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use git2::{Repository as Git2Repo, Signature, StatusOptions};
+use git2::{Cred, CredentialType, FetchOptions, PushOptions, RemoteCallbacks, Repository as Git2Repo, Signature, StatusOptions};
 use chrono::Utc;
 
 use crate::core::config::{Config, RepoConfig, HostEntry};
@@ -189,7 +189,6 @@ impl Repository {
     pub fn push(&self, remote_name: &str) -> Result<()> {
         let mut remote = self.git.find_remote(remote_name)?;
 
-        // Get current branch
         let head = self.git.head()?;
         let branch_name = head
             .shorthand()
@@ -197,8 +196,11 @@ impl Repository {
 
         let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name);
 
-        // Push (this requires SSH key or credentials)
-        remote.push(&[&refspec], None)?;
+        let callbacks = create_credentials_callback();
+        let mut push_options = PushOptions::new();
+        push_options.remote_callbacks(callbacks);
+
+        remote.push(&[&refspec], Some(&mut push_options))?;
 
         Ok(())
     }
@@ -207,14 +209,18 @@ impl Repository {
     pub fn pull(&self, remote_name: &str) -> Result<()> {
         let mut remote = self.git.find_remote(remote_name)?;
 
-        // Fetch
-        remote.fetch(&[] as &[&str], None, None)?;
+        // Fetch with credentials
+        let callbacks = create_credentials_callback();
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(callbacks);
+
+        remote.fetch(&[] as &[&str], Some(&mut fetch_options), None)?;
 
         // Get current branch
         let head = self.git.head()?;
         let branch_name = head.shorthand().unwrap_or("main");
 
-        // Merge
+        // Merge (fast-forward only)
         let fetch_head = self.git.find_reference("FETCH_HEAD")?;
         let fetch_commit = self.git.reference_to_annotated_commit(&fetch_head)?;
 
@@ -269,4 +275,33 @@ impl Repository {
 
         Ok(Signature::now(&name, &email)?)
     }
+}
+
+/// Create RemoteCallbacks with authentication support
+fn create_credentials_callback<'a>() -> RemoteCallbacks<'a> {
+    let mut callbacks = RemoteCallbacks::new();
+
+    callbacks.credentials(|url, username_from_url, allowed_types| {
+        // Try SSH agent first
+        if allowed_types.contains(CredentialType::SSH_KEY) {
+            let username = username_from_url.unwrap_or("git");
+            return Cred::ssh_key_from_agent(username);
+        }
+
+        // Try git credential helper for HTTPS
+        if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
+            if let Ok(config) = git2::Config::open_default() {
+                return Cred::credential_helper(&config, url, username_from_url);
+            }
+        }
+
+        // Default (anonymous)
+        if allowed_types.contains(CredentialType::DEFAULT) {
+            return Cred::default();
+        }
+
+        Err(git2::Error::from_str("no authentication method available"))
+    });
+
+    callbacks
 }

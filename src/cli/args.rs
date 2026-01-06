@@ -22,9 +22,13 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize a new confect repository
     Init {
-        /// Path to create the repository (default: /var/lib/confect)
+        /// Path to create the repository (default: ~/.local/share/confect)
         #[arg(short, long)]
         path: Option<PathBuf>,
+
+        /// Use system-wide repository (/var/lib/confect, requires sudo)
+        #[arg(long)]
+        system: bool,
 
         /// Remote Git URL to use
         #[arg(short, long)]
