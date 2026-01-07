@@ -30,21 +30,13 @@ impl<'a> FileTracker<'a> {
                 let entry = entry?;
                 let file_path = entry.path();
 
-                // Check if it's a regular file or symlink to a regular file
-                let dominated = entry.file_type().is_file()
-                    || (entry.file_type().is_symlink()
-                        && fs::canonicalize(file_path)
-                            .map(|p| p.is_file())
-                            .unwrap_or(false));
-
-                if dominated {
+                // Include regular files and all symlinks
+                if entry.file_type().is_file() || entry.file_type().is_symlink() {
                     self.copy_to_repo(file_path, &category_dir)?;
                     added_files.push(file_path.to_path_buf());
                 }
             }
-        } else if path.is_file()
-            || (path.is_symlink() && fs::canonicalize(path).map(|p| p.is_file()).unwrap_or(false))
-        {
+        } else if path.is_file() || path.is_symlink() {
             self.copy_to_repo(path, &category_dir)?;
             added_files.push(path.to_path_buf());
         }
@@ -63,16 +55,17 @@ impl<'a> FileTracker<'a> {
             fs::create_dir_all(parent)?;
         }
 
-        // Handle symlinks
+        // Remove existing file/symlink if exists
+        if repo_path.exists() || repo_path.is_symlink() {
+            let _ = fs::remove_file(&repo_path);
+        }
+
+        // Handle symlinks - preserve them as symlinks
         let meta = fs::symlink_metadata(system_path)?;
         if meta.file_type().is_symlink() {
-            // Check if symlink points to a regular file
-            if let Ok(real_path) = fs::canonicalize(system_path) {
-                if real_path.is_file() {
-                    fs::copy(&real_path, &repo_path)?;
-                }
-                // Skip symlinks to directories/sockets/etc
-            }
+            let target = fs::read_link(system_path)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &repo_path)?;
         } else if meta.is_file() {
             fs::copy(system_path, &repo_path)?;
         }
@@ -259,7 +252,8 @@ impl<'a> FileTracker<'a> {
         if let Some(cat) = categories.find_for_path(system_path) {
             let repo_path = self.repo.path().join(cat.repo_path_for(system_path));
 
-            if !repo_path.exists() {
+            // Check if exists (file or symlink)
+            if !repo_path.exists() && !repo_path.is_symlink() {
                 return Err(ConfectError::FileNotFound(repo_path));
             }
 
@@ -268,8 +262,20 @@ impl<'a> FileTracker<'a> {
                 fs::create_dir_all(parent)?;
             }
 
-            // Copy file
-            fs::copy(&repo_path, system_path)?;
+            // Remove existing file/symlink
+            if system_path.exists() || system_path.is_symlink() {
+                let _ = fs::remove_file(system_path);
+            }
+
+            // Restore - handle symlinks
+            let meta = fs::symlink_metadata(&repo_path)?;
+            if meta.file_type().is_symlink() {
+                let target = fs::read_link(&repo_path)?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, system_path)?;
+            } else {
+                fs::copy(&repo_path, system_path)?;
+            }
 
             Ok(())
         } else {
