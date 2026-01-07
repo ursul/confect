@@ -11,26 +11,15 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
             name: confect-linux-x86_64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
             name: confect-linux-aarch64
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            name: confect-macos-x86_64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            name: confect-macos-aarch64
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            name: confect-windows-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -51,22 +40,12 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ matrix.name }}.tar.gz confect
           cd ../../..
           sha256sum ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path confect.exe -DestinationPath ../../../${{ matrix.name }}.zip
-          cd ../../..
-          (Get-FileHash ${{ matrix.name }}.zip -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.name }}.zip" | Out-File -Encoding ASCII ${{ matrix.name }}.zip.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -74,7 +53,6 @@ jobs:
           name: ${{ matrix.name }}
           path: |
             *.tar.gz
-            *.zip
             *.sha256
 
   release:

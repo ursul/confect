@@ -38,9 +38,21 @@ confect sync
 cargo install --git https://github.com/ursul/confect
 ```
 
-### Pre-built binaries
+### Pre-built binaries (Linux)
 
 Download from [Releases](https://github.com/ursul/confect/releases).
+
+```bash
+# x86_64
+curl -LO https://github.com/ursul/confect/releases/latest/download/confect-linux-x86_64.tar.gz
+tar xzf confect-linux-x86_64.tar.gz
+sudo mv confect /usr/local/bin/
+
+# aarch64
+curl -LO https://github.com/ursul/confect/releases/latest/download/confect-linux-aarch64.tar.gz
+tar xzf confect-linux-aarch64.tar.gz
+sudo mv confect /usr/local/bin/
+```
 
 ## Usage
 
