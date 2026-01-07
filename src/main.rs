@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use console::style;
 
-use confect::cli::{Cli, Commands};
 use confect::cli::commands;
+use confect::cli::{Cli, Commands};
 
 fn main() {
     if let Err(err) = run() {
@@ -16,7 +16,12 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { path, system, remote, host } => {
+        Commands::Init {
+            path,
+            system,
+            remote,
+            host,
+        } => {
             commands::run_init(path, system, remote, host)?;
         }
 
@@ -156,20 +161,14 @@ fn pull_changes(restore: bool) -> Result<()> {
 
     let repo = Repository::open_default()?;
 
-    println!(
-        "{} Pulling from remote...",
-        style("[1/2]").bold().dim()
-    );
+    println!("{} Pulling from remote...", style("[1/2]").bold().dim());
 
     repo.pull("origin")?;
 
     println!("{} Pulled latest changes", style("✓").green());
 
     if restore {
-        println!(
-            "{} Restoring files...",
-            style("[2/2]").bold().dim()
-        );
+        println!("{} Restoring files...", style("[2/2]").bold().dim());
         commands::run_restore(None, None, false, true, true)?;
     }
 

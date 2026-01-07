@@ -4,7 +4,7 @@ use std::path::Path;
 
 use age::secrecy::ExposeSecret;
 
-use crate::error::{Result, ConfectError};
+use crate::error::{ConfectError, Result};
 
 /// Age encryption wrapper
 pub struct AgeEncryption {
@@ -20,9 +20,8 @@ impl AgeEncryption {
             .map(|s| s.parse::<age::x25519::Recipient>())
             .collect();
 
-        let recipients = recipients.map_err(|e| {
-            ConfectError::Encryption(format!("Invalid recipient: {}", e))
-        })?;
+        let recipients = recipients
+            .map_err(|e| ConfectError::Encryption(format!("Invalid recipient: {}", e)))?;
 
         Ok(Self { recipients })
     }

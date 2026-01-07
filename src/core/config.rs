@@ -1,11 +1,11 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, ConfectError};
+use crate::error::{ConfectError, Result};
 
 /// Global confect configuration (~/.config/confect/config.toml)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub global: GlobalConfig,
@@ -27,7 +27,7 @@ pub struct GlobalConfig {
     pub repo_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EncryptionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -57,16 +57,6 @@ fn default_strategy() -> String {
     "branch".to_string()
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            global: GlobalConfig::default(),
-            encryption: EncryptionConfig::default(),
-            hosts: HostsConfig::default(),
-        }
-    }
-}
-
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
@@ -74,16 +64,6 @@ impl Default for GlobalConfig {
             auto_push: true,
             editor: None,
             repo_path: None,
-        }
-    }
-}
-
-impl Default for EncryptionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            public_key: None,
-            recipients_file: None,
         }
     }
 }
@@ -161,7 +141,7 @@ impl Config {
 }
 
 /// Repository-local configuration (.confect/config.toml)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RepoConfig {
     #[serde(default)]
     pub repository: RepoMeta,
@@ -192,15 +172,6 @@ pub struct RepoHostsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostEntry {
     pub branch: String,
-}
-
-impl Default for RepoConfig {
-    fn default() -> Self {
-        Self {
-            repository: RepoMeta::default(),
-            hosts: RepoHostsConfig::default(),
-        }
-    }
 }
 
 impl RepoConfig {

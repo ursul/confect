@@ -1,10 +1,10 @@
-use std::path::PathBuf;
 use console::style;
 use dialoguer::Confirm;
+use std::path::PathBuf;
 
-use crate::core::{Repository, CategoryManager};
-use crate::fs::{FileTracker, MetadataStore};
+use crate::core::{CategoryManager, Repository};
 use crate::error::Result;
+use crate::fs::{FileTracker, MetadataStore};
 
 pub fn run_restore(
     category: Option<String>,
@@ -41,7 +41,11 @@ pub fn run_restore(
     );
     for path in &files_to_restore {
         let exists = path.exists();
-        let marker = if exists { style("→").yellow() } else { style("+").green() };
+        let marker = if exists {
+            style("→").yellow()
+        } else {
+            style("+").green()
+        };
         println!("  {} {}", marker, path.display());
     }
     println!();
@@ -66,10 +70,7 @@ pub fn run_restore(
 
     // Create backups if requested
     if backup {
-        println!(
-            "{} Creating backups...",
-            style("[1/3]").bold().dim()
-        );
+        println!("{} Creating backups...", style("[1/3]").bold().dim());
         for path in &files_to_restore {
             if path.exists() {
                 let backup_path = PathBuf::from(format!("{}.confect-backup", path.display()));

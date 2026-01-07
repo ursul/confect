@@ -2,7 +2,7 @@ use console::style;
 use dialoguer::Confirm;
 
 use crate::cli::CategoryCommands;
-use crate::core::{Repository, CategoryManager, Category};
+use crate::core::{Category, CategoryManager, Repository};
 use crate::error::Result;
 
 pub fn run_category(cmd: CategoryCommands) -> Result<()> {
@@ -16,13 +16,26 @@ pub fn run_category(cmd: CategoryCommands) -> Result<()> {
         CategoryCommands::Show { name } => {
             show_category(&categories, &name)?;
         }
-        CategoryCommands::Create { name, description, path, encrypt } => {
+        CategoryCommands::Create {
+            name,
+            description,
+            path,
+            encrypt,
+        } => {
             create_category(&mut categories, &name, description, path, encrypt)?;
         }
-        CategoryCommands::Delete { name, force, remove_files } => {
+        CategoryCommands::Delete {
+            name,
+            force,
+            remove_files,
+        } => {
             delete_category(&mut categories, &name, force, remove_files)?;
         }
-        CategoryCommands::AddPath { name, path, encrypt } => {
+        CategoryCommands::AddPath {
+            name,
+            path,
+            encrypt,
+        } => {
             add_path(&mut categories, &name, &path, encrypt)?;
         }
         CategoryCommands::RemovePath { name, path } => {
@@ -52,11 +65,7 @@ fn list_categories(categories: &CategoryManager) -> Result<()> {
 
     for cat in cats {
         let desc = cat.description.as_deref().unwrap_or("");
-        println!(
-            "  {} {}",
-            style(&cat.name).cyan().bold(),
-            style(desc).dim()
-        );
+        println!("  {} {}", style(&cat.name).cyan().bold(), style(desc).dim());
         println!(
             "    {} path(s), {} encrypted pattern(s)",
             cat.paths.len(),
@@ -72,7 +81,11 @@ fn show_category(categories: &CategoryManager, name: &str) -> Result<()> {
     let cat = categories.get(name)?;
 
     println!();
-    println!("{} {}", style("Category:").bold(), style(&cat.name).cyan().bold());
+    println!(
+        "{} {}",
+        style("Category:").bold(),
+        style(&cat.name).cyan().bold()
+    );
 
     if let Some(desc) = &cat.description {
         println!("{} {}", style("Description:").bold(), desc);
@@ -165,12 +178,7 @@ fn delete_category(
     Ok(())
 }
 
-fn add_path(
-    categories: &mut CategoryManager,
-    name: &str,
-    path: &str,
-    encrypt: bool,
-) -> Result<()> {
+fn add_path(categories: &mut CategoryManager, name: &str, path: &str, encrypt: bool) -> Result<()> {
     categories.add_path(name, path.to_string(), encrypt)?;
     categories.save()?;
 
@@ -186,11 +194,7 @@ fn add_path(
     Ok(())
 }
 
-fn remove_path(
-    categories: &mut CategoryManager,
-    name: &str,
-    path: &str,
-) -> Result<()> {
+fn remove_path(categories: &mut CategoryManager, name: &str, path: &str) -> Result<()> {
     categories.remove_path(name, path)?;
     categories.save()?;
 

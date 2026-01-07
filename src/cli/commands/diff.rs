@@ -1,9 +1,9 @@
-use std::path::PathBuf;
 use console::style;
+use std::path::PathBuf;
 
-use crate::core::{Repository, CategoryManager};
-use crate::fs::FileTracker;
+use crate::core::{CategoryManager, Repository};
 use crate::error::Result;
+use crate::fs::FileTracker;
 
 pub fn run_diff(category: Option<String>, file: Option<PathBuf>) -> Result<()> {
     let repo = Repository::open_default()?;
@@ -32,11 +32,7 @@ pub fn run_diff(category: Option<String>, file: Option<PathBuf>) -> Result<()> {
             if !diff.is_empty() {
                 has_diff = true;
                 println!();
-                println!(
-                    "{} {}",
-                    style("diff").bold(),
-                    style(path.display()).cyan()
-                );
+                println!("{} {}", style("diff").bold(), style(path.display()).cyan());
                 println!("{}", style("─".repeat(60)).dim());
 
                 for line in diff.lines() {

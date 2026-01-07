@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use console::style;
+use std::path::PathBuf;
 
 use crate::core::{Config, Repository};
 use crate::error::{ConfectError, Result};

@@ -1,11 +1,11 @@
+use glob::Pattern;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use glob::Pattern;
-use serde::{Deserialize, Serialize};
 
 use crate::core::Repository;
-use crate::error::{Result, ConfectError};
+use crate::error::{ConfectError, Result};
 
 /// A category groups related configuration files together
 #[derive(Debug, Clone, Serialize, Deserialize)]

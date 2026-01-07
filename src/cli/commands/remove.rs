@@ -1,9 +1,9 @@
-use std::path::PathBuf;
 use console::style;
+use std::path::PathBuf;
 
-use crate::core::{Repository, CategoryManager};
-use crate::fs::FileTracker;
+use crate::core::{CategoryManager, Repository};
 use crate::error::Result;
+use crate::fs::FileTracker;
 
 pub fn run_remove(path: PathBuf, delete: bool) -> Result<()> {
     let repo = Repository::open_default()?;
@@ -30,7 +30,11 @@ pub fn run_remove(path: PathBuf, delete: bool) -> Result<()> {
         "{} Removed {} file(s) from tracking{}:",
         style("✓").green().bold(),
         removed_files.len(),
-        if delete { " and deleted from repository" } else { "" }
+        if delete {
+            " and deleted from repository"
+        } else {
+            ""
+        }
     );
     for file in &removed_files {
         println!("  {} {}", style("-").red(), file.display());

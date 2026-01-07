@@ -1,8 +1,8 @@
 use console::style;
 
-use crate::core::{Repository, CategoryManager};
-use crate::fs::FileTracker;
+use crate::core::{CategoryManager, Repository};
 use crate::error::Result;
+use crate::fs::FileTracker;
 
 pub fn run_status(category: Option<String>, show_diff: bool) -> Result<()> {
     let repo = Repository::open_default()?;
@@ -68,7 +68,10 @@ pub fn run_status(category: Option<String>, show_diff: bool) -> Result<()> {
     }
 
     if !added.is_empty() {
-        println!("{}", style("New files (in system, not in repo):").green().bold());
+        println!(
+            "{}",
+            style("New files (in system, not in repo):").green().bold()
+        );
         for path in &added {
             println!("  {} {}", style("A").green(), path.display());
         }
@@ -76,7 +79,12 @@ pub fn run_status(category: Option<String>, show_diff: bool) -> Result<()> {
     }
 
     if !deleted.is_empty() {
-        println!("{}", style("Deleted files (in repo, not in system):").red().bold());
+        println!(
+            "{}",
+            style("Deleted files (in repo, not in system):")
+                .red()
+                .bold()
+        );
         for path in &deleted {
             println!("  {} {}", style("D").red(), path.display());
         }
@@ -93,11 +101,7 @@ pub fn run_status(category: Option<String>, show_diff: bool) -> Result<()> {
 
     // Summary
     let total = modified.len() + added.len() + deleted.len();
-    println!(
-        "{} {} file(s) changed",
-        style("Summary:").bold(),
-        total
-    );
+    println!("{} {} file(s) changed", style("Summary:").bold(), total);
     println!();
     println!("Run {} to commit changes.", style("confect sync").cyan());
     println!("Run {} to see full diff.", style("confect diff").cyan());

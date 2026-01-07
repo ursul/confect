@@ -1,9 +1,9 @@
-use std::path::PathBuf;
 use console::style;
+use std::path::PathBuf;
 
-use crate::core::{Repository, CategoryManager};
+use crate::core::{CategoryManager, Repository};
+use crate::error::{ConfectError, Result};
 use crate::fs::FileTracker;
-use crate::error::{Result, ConfectError};
 
 pub fn run_add(
     path: PathBuf,
@@ -71,7 +71,12 @@ pub fn run_add(
     );
     for file in &added_files {
         let encrypted_mark = if encrypt { " (encrypted)" } else { "" };
-        println!("  {} {}{}", style("+").green(), file.display(), encrypted_mark);
+        println!(
+            "  {} {}{}",
+            style("+").green(),
+            file.display(),
+            encrypted_mark
+        );
     }
     println!();
     println!("Run {} to commit changes.", style("confect sync").cyan());
@@ -80,7 +85,9 @@ pub fn run_add(
 }
 
 fn validate_path(path: &PathBuf) -> Result<()> {
-    let forbidden = ["/", "/root", "/home", "/boot", "/dev", "/proc", "/sys", "/run"];
+    let forbidden = [
+        "/", "/root", "/home", "/boot", "/dev", "/proc", "/sys", "/run",
+    ];
 
     for f in &forbidden {
         if path == &PathBuf::from(f) {

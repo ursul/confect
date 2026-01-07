@@ -1,10 +1,13 @@
+use chrono::Utc;
+use git2::{
+    Cred, CredentialType, FetchOptions, PushOptions, RemoteCallbacks, Repository as Git2Repo,
+    Signature, StatusOptions,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
-use git2::{Cred, CredentialType, FetchOptions, PushOptions, RemoteCallbacks, Repository as Git2Repo, Signature, StatusOptions};
-use chrono::Utc;
 
-use crate::core::config::{Config, RepoConfig, HostEntry};
-use crate::error::{Result, ConfectError};
+use crate::core::config::{Config, HostEntry, RepoConfig};
+use crate::error::{ConfectError, Result};
 
 /// Wrapper around git2::Repository with confect-specific functionality
 pub struct Repository {
@@ -230,9 +233,8 @@ impl Repository {
             let refname = format!("refs/heads/{}", branch_name);
             let mut reference = self.git.find_reference(&refname)?;
             reference.set_target(fetch_commit.id(), "Fast-forward")?;
-            self.git.checkout_head(Some(
-                git2::build::CheckoutBuilder::default().force(),
-            ))?;
+            self.git
+                .checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
         }
 
         Ok(())

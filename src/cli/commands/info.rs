@@ -1,8 +1,8 @@
 use console::style;
 
-use crate::core::{Repository, CategoryManager, Config};
-use crate::fs::FileTracker;
+use crate::core::{CategoryManager, Config, Repository};
 use crate::error::Result;
+use crate::fs::FileTracker;
 
 pub fn run_info() -> Result<()> {
     let repo = Repository::open_default()?;
@@ -39,11 +39,7 @@ pub fn run_info() -> Result<()> {
     } else {
         for cat in &cats {
             let file_count = tracker.count_files_in_category(&cat.name).unwrap_or(0);
-            println!(
-                "  {} ({} files)",
-                style(&cat.name).cyan(),
-                file_count
-            );
+            println!("  {} ({} files)", style(&cat.name).cyan(), file_count);
         }
     }
     println!();
@@ -60,8 +56,18 @@ pub fn run_info() -> Result<()> {
 
     // Config info
     println!("{}", style("Configuration:").bold());
-    println!("  Auto-push:   {}", if config.global.auto_push { "yes" } else { "no" });
-    println!("  Encryption:  {}", if config.encryption.enabled { "enabled" } else { "disabled" });
+    println!(
+        "  Auto-push:   {}",
+        if config.global.auto_push { "yes" } else { "no" }
+    );
+    println!(
+        "  Encryption:  {}",
+        if config.encryption.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!();
 
     Ok(())

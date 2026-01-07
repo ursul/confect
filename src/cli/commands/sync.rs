@@ -1,37 +1,25 @@
 use console::style;
 
 use crate::core::Repository;
+use crate::error::{ConfectError, Result};
 use crate::fs::{FileTracker, MetadataStore};
-use crate::error::{Result, ConfectError};
 
 pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Result<()> {
     let repo = Repository::open_default()?;
     let tracker = FileTracker::new(&repo);
 
-    println!(
-        "{} Checking for changes...",
-        style("[1/4]").bold().dim()
-    );
+    println!("{} Checking for changes...", style("[1/4]").bold().dim());
 
     // Refresh files from system to repository
     let updated = tracker.refresh_all()?;
     if updated.is_empty() {
         if !no_push && repo.has_remote("origin")? {
-            println!(
-                "{} No local changes to commit",
-                style("[2/4]").bold().dim()
-            );
-            println!(
-                "{} Pushing to remote...",
-                style("[3/4]").bold().dim()
-            );
+            println!("{} No local changes to commit", style("[2/4]").bold().dim());
+            println!("{} Pushing to remote...", style("[3/4]").bold().dim());
             repo.push("origin")?;
             println!("{} Pushed to origin", style("✓").green());
             println!();
-            println!(
-                "{} Sync completed successfully!",
-                style("✓").green().bold()
-            );
+            println!("{} Sync completed successfully!", style("✓").green().bold());
             return Ok(());
         }
 
@@ -64,14 +52,15 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
         if categories.len() == 1 {
             format!("Update {} ({} files)", categories[0], file_count)
         } else {
-            format!("Update {} files across {} categories", file_count, categories.len())
+            format!(
+                "Update {} files across {} categories",
+                file_count,
+                categories.len()
+            )
         }
     });
 
-    println!(
-        "{} Creating commit...",
-        style("[3/4]").bold().dim()
-    );
+    println!("{} Creating commit...", style("[3/4]").bold().dim());
 
     // Commit
     repo.commit_all(&commit_message)?;
@@ -84,10 +73,7 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
 
     // Push if enabled
     if !no_push && repo.has_remote("origin")? {
-        println!(
-            "{} Pushing to remote...",
-            style("[4/4]").bold().dim()
-        );
+        println!("{} Pushing to remote...", style("[4/4]").bold().dim());
         repo.push("origin")?;
         println!("{} Pushed to origin", style("✓").green());
     } else {
@@ -98,10 +84,7 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
     }
 
     println!();
-    println!(
-        "{} Sync completed successfully!",
-        style("✓").green().bold()
-    );
+    println!("{} Sync completed successfully!", style("✓").green().bold());
 
     Ok(())
 }

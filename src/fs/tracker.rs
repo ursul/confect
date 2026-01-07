@@ -5,7 +5,7 @@ use walkdir::WalkDir;
 
 use crate::cli::commands::FileStatus;
 use crate::core::{CategoryManager, Repository};
-use crate::error::{Result, ConfectError};
+use crate::error::{ConfectError, Result};
 
 /// Tracks files between the system and the repository
 pub struct FileTracker<'a> {
@@ -119,10 +119,14 @@ impl<'a> FileTracker<'a> {
 
                 // Get system path
                 if let Some(system_path) = cat.system_path_for(
-                    repo_file.strip_prefix(self.repo.path()).unwrap_or(repo_file),
+                    repo_file
+                        .strip_prefix(self.repo.path())
+                        .unwrap_or(repo_file),
                 ) {
                     let status = self.compare_files(&system_path, repo_file)?;
-                    if status != FileStatus::Modified || !self.files_equal(&system_path, repo_file)? {
+                    if status != FileStatus::Modified
+                        || !self.files_equal(&system_path, repo_file)?
+                    {
                         result.insert(system_path, status);
                     }
                 }
@@ -138,13 +142,7 @@ impl<'a> FileTracker<'a> {
         let repo_exists = repo_path.exists();
 
         match (system_exists, repo_exists) {
-            (true, true) => {
-                if self.files_equal(system_path, repo_path)? {
-                    Ok(FileStatus::Modified) // Will be filtered out
-                } else {
-                    Ok(FileStatus::Modified)
-                }
-            }
+            (true, true) => Ok(FileStatus::Modified), // Filtered later if equal
             (true, false) => Ok(FileStatus::Added),
             (false, true) => Ok(FileStatus::Deleted),
             (false, false) => Ok(FileStatus::Missing),
@@ -166,7 +164,10 @@ impl<'a> FileTracker<'a> {
             let repo_path = self.repo.path().join(cat.repo_path_for(system_path));
 
             if !repo_path.exists() {
-                return Ok(format!("File only exists in system: {}", system_path.display()));
+                return Ok(format!(
+                    "File only exists in system: {}",
+                    system_path.display()
+                ));
             }
             if !system_path.exists() {
                 return Ok(format!("File only exists in repo: {}", repo_path.display()));
@@ -223,16 +224,15 @@ impl<'a> FileTracker<'a> {
 
             // Expand paths in category
             for pattern in &cat.paths {
-                for entry in glob::glob(pattern)? {
-                    if let Ok(path) = entry {
-                        if path.is_file() {
-                            let repo_path = category_dir.join(path.to_string_lossy().trim_start_matches('/'));
+                for path in glob::glob(pattern)?.flatten() {
+                    if path.is_file() {
+                        let repo_path =
+                            category_dir.join(path.to_string_lossy().trim_start_matches('/'));
 
-                            // Check if file changed
-                            if !repo_path.exists() || !self.files_equal(&path, &repo_path)? {
-                                self.copy_to_repo(&path, &category_dir)?;
-                                updated.push(path);
-                            }
+                        // Check if file changed
+                        if !repo_path.exists() || !self.files_equal(&path, &repo_path)? {
+                            self.copy_to_repo(&path, &category_dir)?;
+                            updated.push(path);
                         }
                     }
                 }
@@ -281,7 +281,9 @@ impl<'a> FileTracker<'a> {
                 if entry.file_type().is_file() {
                     let repo_path = entry.path();
                     if let Some(system_path) = cat.system_path_for(
-                        repo_path.strip_prefix(self.repo.path()).unwrap_or(repo_path),
+                        repo_path
+                            .strip_prefix(self.repo.path())
+                            .unwrap_or(repo_path),
                     ) {
                         files.push(system_path);
                     }
