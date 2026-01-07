@@ -28,13 +28,23 @@ impl<'a> FileTracker<'a> {
             // Walk directory
             for entry in WalkDir::new(path).follow_links(false) {
                 let entry = entry?;
-                if entry.file_type().is_file() || entry.file_type().is_symlink() {
-                    let file_path = entry.path();
+                let file_path = entry.path();
+
+                // Check if it's a regular file or symlink to a regular file
+                let dominated = entry.file_type().is_file()
+                    || (entry.file_type().is_symlink()
+                        && fs::canonicalize(file_path)
+                            .map(|p| p.is_file())
+                            .unwrap_or(false));
+
+                if dominated {
                     self.copy_to_repo(file_path, &category_dir)?;
                     added_files.push(file_path.to_path_buf());
                 }
             }
-        } else {
+        } else if path.is_file()
+            || (path.is_symlink() && fs::canonicalize(path).map(|p| p.is_file()).unwrap_or(false))
+        {
             self.copy_to_repo(path, &category_dir)?;
             added_files.push(path.to_path_buf());
         }
@@ -56,17 +66,17 @@ impl<'a> FileTracker<'a> {
         // Handle symlinks
         let meta = fs::symlink_metadata(system_path)?;
         if meta.file_type().is_symlink() {
-            let _target = fs::read_link(system_path)?;
-            // Store symlink target - we copy the actual file content
+            // Check if symlink points to a regular file
             if let Ok(real_path) = fs::canonicalize(system_path) {
-                if real_path.exists() {
+                if real_path.is_file() {
                     fs::copy(&real_path, &repo_path)?;
                 }
+                // Skip symlinks to directories/sockets/etc
             }
-            // Symlink info is stored in metadata.toml
-        } else {
+        } else if meta.is_file() {
             fs::copy(system_path, &repo_path)?;
         }
+        // Skip non-regular files (sockets, devices, etc.)
 
         Ok(())
     }
