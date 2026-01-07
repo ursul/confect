@@ -10,8 +10,8 @@ push = true
 # Create git tag
 tag = true
 
-# Tag prefix (v0.1.0)
-tag-prefix = "v"
+# Tag name template
+tag-name = "v{{version}}"
 
 # Tag message
 tag-message = "Release {{version}}"
