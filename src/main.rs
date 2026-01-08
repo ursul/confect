@@ -79,6 +79,10 @@ fn run() -> Result<()> {
         Commands::Diff { category, file } => {
             commands::run_diff(category, file)?;
         }
+
+        Commands::SelfUpdate { check } => {
+            commands::run_self_update(check)?;
+        }
     }
 
     Ok(())

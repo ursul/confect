@@ -5,6 +5,7 @@ mod info;
 mod init;
 mod remove;
 mod restore;
+mod self_update;
 pub mod status;
 mod sync;
 
@@ -15,5 +16,6 @@ pub use info::run_info;
 pub use init::run_init;
 pub use remove::run_remove;
 pub use restore::run_restore;
+pub use self_update::run_self_update;
 pub use status::{run_status, FileStatus};
 pub use sync::run_sync;

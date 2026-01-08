@@ -149,6 +149,14 @@ pub enum Commands {
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
+
+    /// Update confect to the latest version
+    #[command(name = "self-update")]
+    SelfUpdate {
+        /// Check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
