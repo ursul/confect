@@ -56,6 +56,7 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
     // Generate commit message
     let commit_message = message.unwrap_or_else(|| {
         if !updated.is_empty() {
+            // Refreshed files - group by category
             let categories: Vec<_> = updated
                 .iter()
                 .filter_map(|p| tracker.get_category(p).ok())
@@ -73,7 +74,38 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
                 )
             }
         } else {
-            format!("Add {} files", change_count)
+            // New files from git status - extract categories from paths
+            let git_status = repo.status().unwrap_or_default();
+            let mut category_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+
+            for (path, _) in &git_status {
+                // Category is the first path component (e.g., "nginx/etc/..." → "nginx")
+                if let Some(cat) = path.components().next() {
+                    let cat_name = cat.as_os_str().to_string_lossy().to_string();
+                    // Skip .confect directory
+                    if !cat_name.starts_with('.') {
+                        *category_counts.entry(cat_name).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            if category_counts.is_empty() {
+                format!("Add {} files", change_count)
+            } else if category_counts.len() == 1 {
+                let (cat, count) = category_counts.iter().next().unwrap();
+                format!("Add {} ({} files)", cat, count)
+            } else {
+                // Sort by count descending
+                let mut sorted: Vec<_> = category_counts.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+                let parts: Vec<_> = sorted
+                    .iter()
+                    .map(|(cat, count)| format!("{} ({})", cat, count))
+                    .collect();
+                format!("Add {}", parts.join(", "))
+            }
         }
     });
 
