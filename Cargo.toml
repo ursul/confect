@@ -1,6 +1,6 @@
 [package]
 name = "confect"
-version = "1.1.2"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "CLI tool for managing system configuration files with Git"
