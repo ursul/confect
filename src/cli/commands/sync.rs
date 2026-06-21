@@ -101,7 +101,7 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
             } else {
                 // Sort by count descending
                 let mut sorted: Vec<_> = category_counts.into_iter().collect();
-                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
                 let parts: Vec<_> = sorted
                     .iter()

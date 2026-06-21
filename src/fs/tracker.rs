@@ -263,7 +263,7 @@ impl<'a> FileTracker<'a> {
             // Expand paths in category. Exact directory paths are tracked recursively.
             for pattern in &cat.paths {
                 self.refresh_pattern(
-                    &cat,
+                    cat,
                     pattern,
                     &category_dir,
                     &mut seen_system_paths,
