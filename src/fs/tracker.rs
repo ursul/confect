@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::cli::commands::FileStatus;
 use crate::core::{CategoryManager, Repository};
@@ -10,6 +10,27 @@ use crate::error::{ConfectError, Result};
 /// Tracks files between the system and the repository
 pub struct FileTracker<'a> {
     repo: &'a Repository,
+}
+
+/// Files changed while refreshing the repository from the system.
+#[derive(Debug, Default)]
+pub struct RefreshResult {
+    pub updated: Vec<PathBuf>,
+    pub deleted: Vec<PathBuf>,
+}
+
+impl RefreshResult {
+    pub fn is_empty(&self) -> bool {
+        self.updated.is_empty() && self.deleted.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.updated.len() + self.deleted.len()
+    }
+
+    pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.updated.iter().chain(self.deleted.iter())
+    }
 }
 
 impl<'a> FileTracker<'a> {
@@ -114,7 +135,7 @@ impl<'a> FileTracker<'a> {
             // Walk repository files
             for entry in WalkDir::new(&category_dir).follow_links(false) {
                 let entry = entry?;
-                if !entry.file_type().is_file() {
+                if !is_trackable_entry(&entry) {
                     continue;
                 }
 
@@ -152,8 +173,21 @@ impl<'a> FileTracker<'a> {
         }
     }
 
-    /// Check if two files have the same content
+    /// Check if two files or symlinks have the same content
     fn files_equal(&self, path1: &Path, path2: &Path) -> Result<bool> {
+        let meta1 = fs::symlink_metadata(path1)?;
+        let meta2 = fs::symlink_metadata(path2)?;
+
+        if meta1.file_type().is_symlink() || meta2.file_type().is_symlink() {
+            return Ok(meta1.file_type().is_symlink()
+                && meta2.file_type().is_symlink()
+                && fs::read_link(path1)? == fs::read_link(path2)?);
+        }
+
+        if !meta1.is_file() || !meta2.is_file() {
+            return Ok(false);
+        }
+
         let content1 = fs::read(path1)?;
         let content2 = fs::read(path2)?;
         Ok(content1 == content2)
@@ -218,31 +252,110 @@ impl<'a> FileTracker<'a> {
     }
 
     /// Refresh all tracked files from system to repository
-    pub fn refresh_all(&self) -> Result<Vec<PathBuf>> {
+    pub fn refresh_all(&self) -> Result<RefreshResult> {
         let categories = CategoryManager::load(self.repo)?;
-        let mut updated = Vec::new();
+        let mut result = RefreshResult::default();
 
         for cat in categories.list() {
             let category_dir = self.repo.path().join(&cat.name);
+            let mut seen_system_paths = HashSet::new();
 
-            // Expand paths in category
+            // Expand paths in category. Exact directory paths are tracked recursively.
             for pattern in &cat.paths {
-                for path in glob::glob(pattern)?.flatten() {
-                    if path.is_file() {
-                        let repo_path =
-                            category_dir.join(path.to_string_lossy().trim_start_matches('/'));
+                self.refresh_pattern(
+                    &cat,
+                    pattern,
+                    &category_dir,
+                    &mut seen_system_paths,
+                    &mut result.updated,
+                )?;
+            }
 
-                        // Check if file changed
-                        if !repo_path.exists() || !self.files_equal(&path, &repo_path)? {
-                            self.copy_to_repo(&path, &category_dir)?;
-                            updated.push(path);
-                        }
+            if !category_dir.exists() {
+                continue;
+            }
+
+            let mut repo_files = Vec::new();
+            for entry in WalkDir::new(&category_dir).follow_links(false) {
+                let entry = entry?;
+                if is_trackable_entry(&entry) {
+                    repo_files.push(entry.path().to_path_buf());
+                }
+            }
+
+            for repo_file in repo_files {
+                if let Some(system_path) = cat.system_path_for(
+                    repo_file
+                        .strip_prefix(self.repo.path())
+                        .unwrap_or(&repo_file),
+                ) {
+                    if !seen_system_paths.contains(&system_path) && cat.matches(&system_path) {
+                        fs::remove_file(&repo_file)?;
+                        result.deleted.push(system_path);
                     }
                 }
             }
+
+            remove_empty_dirs(&category_dir)?;
         }
 
-        Ok(updated)
+        Ok(result)
+    }
+
+    fn refresh_pattern(
+        &self,
+        cat: &crate::core::Category,
+        pattern: &str,
+        category_dir: &Path,
+        seen_system_paths: &mut HashSet<PathBuf>,
+        updated: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        for path in glob::glob(pattern)? {
+            let path = path?;
+            if !cat.matches(&path) {
+                continue;
+            }
+
+            if path.is_dir() {
+                let mut entries = WalkDir::new(&path).follow_links(false).into_iter();
+                while let Some(entry) = entries.next() {
+                    let entry = entry?;
+                    let entry_path = entry.path();
+
+                    if entry.file_type().is_dir() && !cat.matches(entry_path) {
+                        entries.skip_current_dir();
+                        continue;
+                    }
+
+                    if is_trackable_entry(&entry) {
+                        self.refresh_file(entry_path, category_dir, seen_system_paths, updated)?;
+                    }
+                }
+            } else if is_trackable_path(&path) {
+                self.refresh_file(&path, category_dir, seen_system_paths, updated)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn refresh_file(
+        &self,
+        path: &Path,
+        category_dir: &Path,
+        seen_system_paths: &mut HashSet<PathBuf>,
+        updated: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        seen_system_paths.insert(path.to_path_buf());
+
+        let repo_path = category_dir.join(path.to_string_lossy().trim_start_matches('/'));
+
+        if !repo_path.exists() || !self.files_equal(path, &repo_path)? {
+            self.copy_to_repo(path, category_dir)?;
+            updated.push(path.to_path_buf());
+        }
+
+        Ok(())
     }
 
     /// Restore a file from repository to system
@@ -294,7 +407,7 @@ impl<'a> FileTracker<'a> {
         if category_dir.exists() {
             for entry in WalkDir::new(&category_dir).follow_links(false) {
                 let entry = entry?;
-                if entry.file_type().is_file() {
+                if is_trackable_entry(&entry) {
                     let repo_path = entry.path();
                     if let Some(system_path) = cat.system_path_for(
                         repo_path
@@ -340,5 +453,93 @@ impl<'a> FileTracker<'a> {
             .find_for_path(path)
             .map(|c| c.name.clone())
             .ok_or_else(|| ConfectError::PathNotTracked(path.to_path_buf()))
+    }
+}
+
+fn is_trackable_entry(entry: &DirEntry) -> bool {
+    let file_type = entry.file_type();
+    file_type.is_file() || file_type.is_symlink()
+}
+
+fn is_trackable_path(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.is_file() || meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn remove_empty_dirs(root: &Path) -> Result<()> {
+    let mut dirs = Vec::new();
+
+    for entry in WalkDir::new(root).min_depth(1).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_dir() {
+            dirs.push(entry.path().to_path_buf());
+        }
+    }
+
+    dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+    for dir in dirs {
+        if fs::read_dir(&dir)?.next().is_none() {
+            fs::remove_dir(&dir)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{CategoryManager, Repository};
+    use tempfile::tempdir;
+
+    #[test]
+    fn refresh_all_adds_new_files_and_removes_deleted_files_in_tracked_directory() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_dir = temp.path().join("repo");
+        let source_dir = temp.path().join("source");
+        fs::create_dir_all(&source_dir)?;
+
+        let old_file = source_dir.join("old.conf");
+        fs::write(&old_file, "old")?;
+
+        let repo = Repository::init(&repo_dir, "test-host")?;
+        let mut categories = CategoryManager::load(&repo)?;
+        categories.create(
+            "configs",
+            None,
+            vec![source_dir.to_string_lossy().to_string()],
+        )?;
+        categories.save()?;
+
+        let tracker = FileTracker::new(&repo);
+        tracker.add(&source_dir, "configs", false)?;
+
+        let nested_dir = source_dir.join("nested");
+        fs::create_dir_all(&nested_dir)?;
+        let new_file = nested_dir.join("new.conf");
+        fs::write(&new_file, "new")?;
+        fs::remove_file(&old_file)?;
+
+        let refreshed = tracker.refresh_all()?;
+
+        let repo_old_file = repo_dir.join("configs").join(
+            old_file
+                .strip_prefix("/")
+                .expect("tempdir path is absolute"),
+        );
+        let repo_new_file = repo_dir.join("configs").join(
+            new_file
+                .strip_prefix("/")
+                .expect("tempdir path is absolute"),
+        );
+
+        assert!(refreshed.updated.contains(&new_file));
+        assert!(refreshed.deleted.contains(&old_file));
+        assert!(!repo_old_file.exists());
+        assert_eq!(fs::read_to_string(repo_new_file)?, "new");
+
+        Ok(())
     }
 }

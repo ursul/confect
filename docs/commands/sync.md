@@ -37,8 +37,8 @@ confect sync -m "Update nvim config"
 
 ## What it does
 
-1. **Check for changes** — Compares tracked files with repository
-2. **Update repository** — Copies changed files to repo
+1. **Check for changes** — Compares tracked files and directories with repository
+2. **Update repository** — Copies new/changed files and removes deleted files
 3. **Create commit** — Commits all changes with auto-generated message
 4. **Push to remote** — Pushes to origin (unless `--no-push`)
 

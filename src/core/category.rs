@@ -42,22 +42,14 @@ impl Category {
 
         // Check exclusions first
         for pattern in &self.exclude {
-            if let Ok(p) = Pattern::new(pattern) {
-                if p.matches(&path_str) {
-                    return false;
-                }
+            if pattern_covers_path(pattern, path, &path_str) {
+                return false;
             }
         }
 
         // Check if path matches any pattern
         for pattern in &self.paths {
-            if let Ok(p) = Pattern::new(pattern) {
-                if p.matches(&path_str) {
-                    return true;
-                }
-            }
-            // Also check exact match
-            if pattern == &path_str.to_string() {
+            if pattern_covers_path(pattern, path, &path_str) {
                 return true;
             }
         }
@@ -103,6 +95,50 @@ impl Category {
         }
 
         Some(PathBuf::from("/").join(rest))
+    }
+}
+
+fn pattern_covers_path(pattern: &str, path: &Path, path_str: &str) -> bool {
+    if has_glob_metachar(pattern) {
+        return Pattern::new(pattern)
+            .map(|p| p.matches(path_str))
+            .unwrap_or(false);
+    }
+
+    let pattern_path = Path::new(pattern);
+    path == pattern_path || path.starts_with(pattern_path)
+}
+
+fn has_glob_metachar(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Category;
+    use std::path::Path;
+
+    #[test]
+    fn exact_directory_path_matches_children() {
+        let mut category = Category::new("nginx");
+        category.paths.push("/etc/nginx".to_string());
+
+        assert!(category.matches(Path::new("/etc/nginx")));
+        assert!(category.matches(Path::new("/etc/nginx/nginx.conf")));
+        assert!(category.matches(Path::new("/etc/nginx/sites-enabled/default")));
+        assert!(!category.matches(Path::new("/etc/nginx-old/nginx.conf")));
+    }
+
+    #[test]
+    fn exact_excluded_directory_path_excludes_children() {
+        let mut category = Category::new("nginx");
+        category.paths.push("/etc/nginx".to_string());
+        category.exclude.push("/etc/nginx/cache".to_string());
+
+        assert!(category.matches(Path::new("/etc/nginx/nginx.conf")));
+        assert!(!category.matches(Path::new("/etc/nginx/cache/state.db")));
     }
 }
 

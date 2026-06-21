@@ -11,12 +11,12 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
     println!("{} Checking for changes...", style("[1/4]").bold().dim());
 
     // Refresh files from system to repository
-    let updated = tracker.refresh_all()?;
+    let refreshed = tracker.refresh_all()?;
 
     // Check if there are any git changes (including untracked files from `add`)
     let has_git_changes = repo.has_changes()?;
 
-    if updated.is_empty() && !has_git_changes {
+    if refreshed.is_empty() && !has_git_changes {
         if !no_push && repo.has_remote("origin")? {
             println!("{} No local changes to commit", style("[2/4]").bold().dim());
             println!("{} Pushing to remote...", style("[3/4]").bold().dim());
@@ -31,11 +31,11 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
     }
 
     // Count changes for message
-    let change_count = if updated.is_empty() {
+    let change_count = if refreshed.is_empty() {
         // Count from git status
         repo.status()?.len()
     } else {
-        updated.len()
+        refreshed.len()
     };
 
     println!(
@@ -45,31 +45,34 @@ pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Res
     );
 
     // Update metadata for refreshed files
-    if !updated.is_empty() {
+    if !refreshed.is_empty() {
         let mut metadata = MetadataStore::load(&repo)?;
-        for path in &updated {
+        for path in &refreshed.updated {
             metadata.update_from_system(path)?;
+        }
+        for path in &refreshed.deleted {
+            metadata.remove(path);
         }
         metadata.save()?;
     }
 
     // Generate commit message
     let commit_message = message.unwrap_or_else(|| {
-        if !updated.is_empty() {
+        if !refreshed.is_empty() {
             // Refreshed files - group by category
-            let categories: Vec<_> = updated
-                .iter()
+            let categories: Vec<_> = refreshed
+                .paths()
                 .filter_map(|p| tracker.get_category(p).ok())
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
 
             if categories.len() == 1 {
-                format!("Update {} ({} files)", categories[0], updated.len())
+                format!("Sync {} ({} files)", categories[0], refreshed.len())
             } else {
                 format!(
-                    "Update {} files across {} categories",
-                    updated.len(),
+                    "Sync {} files across {} categories",
+                    refreshed.len(),
                     categories.len()
                 )
             }

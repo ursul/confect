@@ -85,6 +85,9 @@ confect pull
 confect status
 ```
 
+When a tracked path is a directory, `sync` also picks up new files inside it and
+removes files that were deleted from the system.
+
 ### Restoring
 
 ```bash
