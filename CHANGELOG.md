@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-21
+
+### Added
+
+- `sync` now automatically tracks new files added inside tracked directories.
+
+### Changed
+
+- Exact directory paths in categories now also match their nested files and
+  subdirectories.
+- `sync` now removes repository copies and stored metadata for files that were
+  deleted from tracked directories.
+- Symlinks are now consistently treated as trackable entries during status,
+  refresh, and directory listing.
+
 ## [0.1.0] - 2024-XX-XX
 
 ### Added
@@ -21,5 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for `--system` flag for system-wide repository
 - SSH and HTTPS authentication for Git remotes
 
-[Unreleased]: https://github.com/ursul/confect/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ursul/confect/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/ursul/confect/compare/v1.3.0...v1.4.0
 [0.1.0]: https://github.com/ursul/confect/releases/tag/v0.1.0
