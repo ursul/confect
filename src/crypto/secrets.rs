@@ -18,6 +18,7 @@ pub const HISTORY_NEEDLES: &[&str] = &[
     "PRIVATE KEY BLOCK-----",
     "AGE-SECRET-KEY-1",
     "PuTTY-User-Key-File-",
+    "\"kty\"",
     "SCRAM-SHA-256$",
     "\"md5",
     ":$apr1$",
@@ -47,6 +48,10 @@ pub fn detect(content: &[u8]) -> Option<&'static str> {
         }
     }
 
+    if is_private_jwk(&text) {
+        return Some("JSON Web Key private key");
+    }
+
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.starts_with(';') {
@@ -63,6 +68,21 @@ pub fn detect(content: &[u8]) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// A JSON Web Key with its private member `d` (certbot keeps ACME account keys so).
+fn is_private_jwk(text: &str) -> bool {
+    if !text.contains("\"kty\"") {
+        return false;
+    }
+    let mut rest = text;
+    while let Some(index) = rest.find("\"d\"") {
+        rest = &rest[index + 3..];
+        if rest.trim_start().starts_with(':') {
+            return true;
+        }
+    }
+    false
 }
 
 /// PgBouncer `userlist.txt` line: `"user" "md5<32 hex>"`.
@@ -109,6 +129,15 @@ mod tests {
             detect(b"# comment\nAGE-SECRET-KEY-1QQQ\n"),
             Some("age identity")
         );
+    }
+
+    #[test]
+    fn private_json_web_keys_are_detected() {
+        assert_eq!(
+            detect(br#"{"n": "wTvj", "e": "AQAB", "d": "secret", "p": "x", "kty": "RSA"}"#),
+            Some("JSON Web Key private key")
+        );
+        assert_eq!(detect(br#"{"kty": "RSA", "n": "wTvj", "e": "AQAB"}"#), None);
     }
 
     #[test]

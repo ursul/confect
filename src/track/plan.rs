@@ -81,7 +81,7 @@ pub struct Scope {
 
 impl Scope {
     fn includes_category(&self, name: &str) -> bool {
-        self.category.as_deref().map_or(true, |c| c == name)
+        self.category.as_deref().is_none_or(|c| c == name)
     }
 
     fn includes_path(&self, path: &Path) -> bool {
@@ -119,7 +119,7 @@ pub fn build(
             .map(|(path, meta)| (path.clone(), meta.clone()))
             .collect();
         for (path, kind) in store.list_category(&category.name) {
-            if stored.contains_key(&path) || metadata.get(&path).is_some() {
+            if stored.contains_key(&path) {
                 continue;
             }
             let encrypted_copy = path
@@ -133,7 +133,12 @@ pub fn build(
         }
 
         for (path, entry) in &scan.entries {
-            if !scope.includes_path(path) {
+            // A path two legacy categories cover belongs to the more specific one; the
+            // other category's copy is purged below.
+            let owned = categories
+                .find_for_path(path)
+                .is_some_and(|owner| owner.name == category.name);
+            if !scope.includes_path(path) || !owned {
                 continue;
             }
             let previous = stored.remove(path);
@@ -160,7 +165,10 @@ pub fn build(
         }
     }
 
-    plan.changes.sort_by(|a, b| a.path.cmp(&b.path));
+    plan.changes.sort_by(|a, b| {
+        let removing = |c: &Change| !matches!(c.action, Action::Delete | Action::Purge);
+        a.path.cmp(&b.path).then(removing(a).cmp(&removing(b)))
+    });
     Ok(plan)
 }
 
@@ -329,7 +337,12 @@ fn apply_change(change: &Change, store: &Store, metadata: &mut Metadata) -> Resu
     match change.action {
         Action::Delete | Action::Purge => {
             store.remove(&change.category, &change.path)?;
-            metadata.remove(&change.path);
+            if metadata
+                .get(&change.path)
+                .is_some_and(|meta| meta.category == change.category)
+            {
+                metadata.remove(&change.path);
+            }
         }
         Action::Add | Action::Update { .. } => {
             let entry = change

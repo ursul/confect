@@ -74,9 +74,8 @@ pub fn run(
     };
     let plan = ctx.commit_category_change(&scope)?;
 
-    let added: Vec<_> = plan
-        .changes
-        .iter()
+    let added: Vec<_> = ui::visible_changes(&plan.changes)
+        .into_iter()
         .filter(|c| c.action == Action::Add)
         .collect();
     ui::success(&format!(

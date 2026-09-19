@@ -75,6 +75,7 @@ fn migrate_indexes_files_restricts_permissions_and_reports_secrets() {
 
     let log = env.git(&repo, &["log", "-1", "--format=%s"]);
     assert_eq!(log.trim(), "Migrate repository to confect 2 format");
+    assert!(metadata.contains("kind = \"dir\""), "{}", metadata);
     env.ok(&["migrate"]);
 
     // The key is already stored in plaintext: sync does not re-add it, audit reports it.
@@ -83,4 +84,46 @@ fn migrate_indexes_files_restricts_permissions_and_reports_secrets() {
     env.ok(&["sync", "--no-push"]);
     env.code(&["audit"], 0);
     env.code(&["audit", "--history"], 2);
+}
+
+#[test]
+fn overlapping_legacy_categories_keep_one_copy_in_the_more_specific_one() {
+    let env = Env::new();
+    let repo = legacy_repo(&env);
+    // A second 1.x category that also stored app.conf.
+    let conf = env.sys_path("etc/app/app.conf");
+    let categories = fs::read_to_string(repo.join(".confect/categories.toml")).unwrap();
+    fs::write(
+        repo.join(".confect/categories.toml"),
+        format!(
+            "{}\n[categories.exact]\npaths = [\"{}\"]\n",
+            categories,
+            conf.display()
+        ),
+    )
+    .unwrap();
+    let duplicate = env.stored("exact", &conf);
+    fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
+    fs::copy(&conf, &duplicate).unwrap();
+    env.git(&repo, &["add", "-A"]);
+    env.git(&repo, &["commit", "-q", "-m", "overlap"]);
+
+    let out = env.ok(&["migrate", "--yes"]);
+    assert!(out.contains("overlap"), "{}", out);
+    env.ok(&["category", "exclude", "add", "app", "*.key"]);
+    env.ok(&["sync", "--no-push"]);
+
+    assert!(env.stored("exact", &conf).exists());
+    assert!(!env.stored("app", &conf).exists());
+    let metadata = fs::read_to_string(repo.join(".confect/metadata.toml")).unwrap();
+    let entry = metadata
+        .split("[entries.")
+        .find(|block| block.starts_with(&format!("\"{}\"", conf.display())))
+        .expect("entry for app.conf");
+    assert!(entry.contains("category = \"exact\""), "{}", entry);
+
+    let before = env.head_count();
+    let out = env.ok(&["sync", "--no-push"]);
+    assert!(out.contains("Nothing to commit"), "{}", out);
+    assert_eq!(env.head_count(), before);
 }

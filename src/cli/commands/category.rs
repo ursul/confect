@@ -171,11 +171,12 @@ fn edit_patterns(ctx: &mut Ctx, command: PatternCommands, list: PatternList) -> 
     };
     let plan = ctx.commit_category_change(&scope)?;
     ui::success(&format!(
-        "{} {} {} of '{}'; {} stored path(s) updated",
+        "{} {} {} the {} of '{}'; {} stored path(s) updated",
         if add { "Added" } else { "Removed" },
         pattern,
-        if add { "to the" } else { "from the" },
+        if add { "to" } else { "from" },
         list.label(),
+        name,
         plan.changes.len()
     ));
     Ok(())

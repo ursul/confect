@@ -123,3 +123,24 @@ pub fn confirm(prompt: &str, yes: bool) -> Result<bool> {
         .default(false)
         .interact()?)
 }
+
+/// Changes worth listing: a new directory is implied by the new files inside it.
+/// Relies on the plan being sorted by path, which puts a directory's content right after it.
+pub fn visible_changes(changes: &[Change]) -> Vec<&Change> {
+    changes
+        .iter()
+        .enumerate()
+        .filter(|(index, change)| {
+            let new_dir = change.action == Action::Add
+                && change
+                    .system
+                    .as_ref()
+                    .is_some_and(|s| s.kind == crate::track::Kind::Dir);
+            let has_content = changes
+                .get(index + 1)
+                .is_some_and(|next| next.path.starts_with(&change.path));
+            !(new_dir && has_content)
+        })
+        .map(|(_, change)| change)
+        .collect()
+}

@@ -39,7 +39,7 @@ pub fn run(
         println!();
     }
 
-    for change in &plan.changes {
+    for change in ui::visible_changes(&plan.changes) {
         println!("  {}", ui::change_line(change));
         if show_diff {
             if let Some(text) = diff::render(&ctx, change) {

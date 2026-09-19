@@ -37,6 +37,13 @@ pub fn run(explicit_repo: Option<&Path>, yes: bool) -> Result<()> {
     }
 
     let categories = repo.categories()?;
+    for (first, second) in overlaps(&categories) {
+        ui::warn(&format!(
+            "{} and {} overlap; the more specific category keeps the files and the other \
+             copy is dropped at the next sync. Remove the redundant path.",
+            first, second
+        ));
+    }
     for category in categories.list() {
         for pattern in &category.paths {
             if !pattern.starts_with('/') {
@@ -58,6 +65,10 @@ pub fn run(explicit_repo: Option<&Path>, yes: bool) -> Result<()> {
     let mut indexed = 0;
     for category in categories.list() {
         for (path, kind) in store.list_category(&category.name) {
+            let owner = categories.find_for_path(&path).map(|c| c.name.as_str());
+            if owner.is_some_and(|owner| owner != category.name) {
+                continue;
+            }
             let meta = match SysEntry::read(&path) {
                 Ok(Some(entry)) if entry.kind == kind => {
                     EntryMeta::from_system(&category.name, &entry, false)
@@ -68,6 +79,28 @@ pub fn run(explicit_repo: Option<&Path>, yes: bool) -> Result<()> {
             indexed += 1;
         }
     }
+    // Directory attributes are captured now, so the first status after the migration
+    // shows real differences only.
+    let plan = crate::track::plan::build(
+        repo.path(),
+        &categories,
+        &rebuilt,
+        &store,
+        &crate::track::plan::Scope::default(),
+    )?;
+    let directories = crate::track::plan::Plan {
+        changes: plan
+            .changes
+            .into_iter()
+            .filter(|c| {
+                c.action == crate::track::Action::Add
+                    && c.system.as_ref().is_some_and(|s| s.kind == Kind::Dir)
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let failures = crate::track::plan::apply(&directories, &store, &mut rebuilt)?;
+    crate::cli::context::report_failures(&failures)?;
     rebuilt.save()?;
 
     let created = repo.repo_config().repository.created.clone();
@@ -111,6 +144,30 @@ pub fn run(explicit_repo: Option<&Path>, yes: bool) -> Result<()> {
         style("confect sync").cyan()
     );
     Ok(())
+}
+
+/// Pairs of category paths where one lies inside the other, as "category:path" labels.
+fn overlaps(categories: &crate::core::CategoryManager) -> Vec<(String, String)> {
+    use crate::core::category::pattern_covers;
+    use crate::core::paths::glob_base;
+    let items: Vec<(&str, &str)> = categories
+        .list()
+        .flat_map(|c| c.paths.iter().map(move |p| (c.name.as_str(), p.as_str())))
+        .collect();
+    let mut result = Vec::new();
+    for (i, (first_category, first)) in items.iter().enumerate() {
+        for (second_category, second) in &items[i + 1..] {
+            if pattern_covers(first, &glob_base(second))
+                || pattern_covers(second, &glob_base(first))
+            {
+                result.push((
+                    format!("{}:{}", first_category, first),
+                    format!("{}:{}", second_category, second),
+                ));
+            }
+        }
+    }
+    result
 }
 
 /// Index a stored copy whose system file is gone, using the copy's own attributes.

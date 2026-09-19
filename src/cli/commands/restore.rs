@@ -38,7 +38,7 @@ pub fn restore_with(ctx: &Ctx, options: Options) -> Result<()> {
             options
                 .category
                 .as_deref()
-                .map_or(true, |c| meta.category == c)
+                .is_none_or(|c| meta.category == c)
         })
         .filter(|(path, _)| scope.is_empty() || scope.iter().any(|s| path.starts_with(s)))
         .map(|(path, _)| path.clone())
