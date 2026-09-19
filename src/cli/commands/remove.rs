@@ -73,6 +73,7 @@ pub fn run(explicit_repo: Option<&Path>, paths: Vec<PathBuf>) -> Result<()> {
         let plan = ctx.commit_category_change(&Scope {
             category: Some(name),
             paths: scope_paths.clone(),
+            ..Scope::default()
         })?;
         dropped += plan.changes.len();
     }

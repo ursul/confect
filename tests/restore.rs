@@ -112,3 +112,44 @@ fn unchanged_files_are_not_touched() {
     let out = env.ok(&["restore", "--yes"]);
     assert!(out.contains("Nothing to restore"), "{}", out);
 }
+
+#[test]
+fn a_symlinked_parent_owned_by_another_user_is_not_followed() {
+    let env = Env::initialized();
+    let file = env.write("etc/app/app.conf", "original\n");
+    env.ok(&[
+        "add",
+        file.to_str().unwrap(),
+        "-c",
+        "app",
+        "--create-category",
+    ]);
+    env.ok(&["sync"]);
+
+    let elsewhere = env.root.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::remove_dir_all(env.sys_path("etc/app")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, env.sys_path("etc/app")).unwrap();
+
+    if common::is_root() {
+        // A link planted by somebody else: restore must refuse to follow it.
+        nix::unistd::fchownat(
+            nix::fcntl::AT_FDCWD,
+            &env.sys_path("etc/app"),
+            Some(nix::unistd::Uid::from_raw(65534)),
+            None,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        let out = env.code(&["restore", "--yes"], 1);
+        assert!(out.contains("owned by another user"), "{}", out);
+        assert!(!elsewhere.join("app.conf").exists());
+    } else {
+        // The user's own link is trusted, like root-owned merged-/usr links.
+        env.ok(&["restore", "--yes"]);
+        assert_eq!(
+            fs::read_to_string(elsewhere.join("app.conf")).unwrap(),
+            "original\n"
+        );
+    }
+}

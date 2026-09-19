@@ -13,6 +13,7 @@ pub fn run(
     message: Option<String>,
     no_push: bool,
     force_push: bool,
+    reencrypt: bool,
 ) -> Result<()> {
     let mut ctx = Ctx::open(explicit_repo)?;
     let _lock = ctx.repo.lock()?;
@@ -24,7 +25,10 @@ pub fn run(
         ));
     }
 
-    let plan = ctx.plan(&Scope::default())?;
+    let plan = ctx.plan(&Scope {
+        reencrypt,
+        ..Scope::default()
+    })?;
     ui::print_warnings(&plan.warnings);
     guard_secrets(&plan)?;
 

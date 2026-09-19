@@ -86,6 +86,11 @@ pub enum Commands {
         /// Push even if auto_push is off
         #[arg(long)]
         push: bool,
+
+        /// Encrypt all encrypted files again from the system, e.g. after replacing the
+        /// age key (old copies that cannot be decrypted are otherwise kept)
+        #[arg(long)]
+        reencrypt: bool,
     },
 
     /// Write stored files back to the system

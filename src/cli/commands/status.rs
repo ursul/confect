@@ -19,6 +19,7 @@ pub fn run(
     let scope = Scope {
         category,
         paths: paths.iter().map(|p| absolute(p)).collect::<Result<_>>()?,
+        ..Scope::default()
     };
     let plan = ctx.plan(&scope)?;
 

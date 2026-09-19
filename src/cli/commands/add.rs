@@ -71,6 +71,7 @@ pub fn run(
     let scope = Scope {
         category: Some(category.clone()),
         paths: targets.iter().map(|(path, _)| path.clone()).collect(),
+        ..Scope::default()
     };
     let plan = ctx.commit_category_change(&scope)?;
 

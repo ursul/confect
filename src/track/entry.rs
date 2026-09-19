@@ -86,21 +86,23 @@ pub fn group_name(gid: u32) -> String {
         .unwrap_or_else(|| gid.to_string())
 }
 
-/// Resolve an owner on this host by name first (UIDs differ between machines).
-pub fn resolve_uid(name: &str, fallback: u32) -> u32 {
+/// The UID of a stored owner on this host, looked up by name (UIDs differ between
+/// machines). A name that is only a number was stored because it had no name.
+/// `None` when this host has no such user: the numeric UID could belong to someone else.
+pub fn resolve_uid(name: &str) -> Option<u32> {
     User::from_name(name)
         .ok()
         .flatten()
         .map(|u| u.uid.as_raw())
-        .unwrap_or(fallback)
+        .or_else(|| name.parse().ok())
 }
 
-pub fn resolve_gid(name: &str, fallback: u32) -> u32 {
+pub fn resolve_gid(name: &str) -> Option<u32> {
     Group::from_name(name)
         .ok()
         .flatten()
         .map(|g| g.gid.as_raw())
-        .unwrap_or(fallback)
+        .or_else(|| name.parse().ok())
 }
 
 pub fn mode_string(mode: u32) -> String {

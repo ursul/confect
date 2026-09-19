@@ -33,5 +33,9 @@ sudo confect self-update --yes
 5. Extracts only the `confect` executable, checks that it is an ELF binary, and replaces the
    running binary atomically.
 
+The checksum comes from the same release as the archive: it catches a damaged download, not a
+compromised release. Where that matters, install releases by hand and compare the checksum
+with one obtained separately.
+
 Replacing `/usr/local/bin/confect` needs write access to `/usr/local/bin`, hence `sudo`.
 Release builds exist for Linux on x86_64 and aarch64 only.

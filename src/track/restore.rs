@@ -1,14 +1,15 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use nix::fcntl::AtFlags;
-use nix::unistd::{fchownat, Gid, Uid};
+use nix::errno::Errno;
+use nix::unistd::{fchown, Gid, Uid};
 
 use crate::error::{ConfectError, IoContext, Result};
 use crate::track::entry::{resolve_gid, resolve_uid, Kind, SysEntry};
 use crate::track::metadata::{EntryMeta, Metadata};
+use crate::track::safe_fs::{split, Dir};
 use crate::track::store::{files_equal, Store};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +72,10 @@ fn state_of(path: &Path, meta: &EntryMeta, store: &Store) -> Result<RestoreState
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(RestoreState::Create),
         Err(err) => return Err(ConfectError::io_at(path, err)),
     };
-    let wanted_uid = resolve_uid(&meta.owner, meta.uid);
-    let wanted_gid = resolve_gid(&meta.group, meta.gid);
+    let owner_differs = resolve_uid(&meta.owner).is_some_and(|uid| uid != current.uid)
+        || resolve_gid(&meta.group).is_some_and(|gid| gid != current.gid);
     let attributes = current.kind != meta.kind
-        || current.uid != wanted_uid
-        || current.gid != wanted_gid
+        || owner_differs
         || (meta.kind != Kind::Symlink && meta.mode_bits() != Some(current.mode));
     let content = match (meta.kind, current.kind) {
         (Kind::Dir, Kind::Dir) => false,
@@ -96,6 +96,9 @@ fn state_of(path: &Path, meta: &EntryMeta, store: &Store) -> Result<RestoreState
 }
 
 /// Write the selected entries back to the system.
+///
+/// Every write goes through [`Dir`], so a symlink planted anywhere on the way by another
+/// user cannot redirect it.
 pub fn restore(items: &[RestoreItem], store: &Store, backup: bool) -> RestoreReport {
     let mut report = RestoreReport::default();
     let stamp = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
@@ -106,7 +109,7 @@ pub fn restore(items: &[RestoreItem], store: &Store, backup: bool) -> RestoreRep
         .partition(|item| item.meta.kind == Kind::Dir);
 
     for item in &dirs {
-        if let Err(err) = ensure_dir(&item.path) {
+        if let Err(err) = Dir::open(&item.path, true) {
             report.failures.push((item.path.clone(), err.to_string()));
         }
     }
@@ -130,7 +133,7 @@ pub fn restore(items: &[RestoreItem], store: &Store, backup: bool) -> RestoreRep
     let mut dirs = dirs;
     dirs.sort_by_key(|item| std::cmp::Reverse(item.path.components().count()));
     for item in dirs {
-        match set_attributes_nofollow(&item.path, &item.meta, &mut report.warnings) {
+        match set_dir_attributes(item, &mut report.warnings) {
             Ok(()) => report.restored += 1,
             Err(err) => report.failures.push((item.path.clone(), err.to_string())),
         }
@@ -138,51 +141,29 @@ pub fn restore(items: &[RestoreItem], store: &Store, backup: bool) -> RestoreRep
     report
 }
 
-fn ensure_dir(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(ConfectError::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "expected a directory, found something else; not replacing it".into(),
-        }),
-        Err(err) if err.kind() == ErrorKind::NotFound => fs::create_dir_all(path).at(path),
-        Err(err) => Err(ConfectError::io_at(path, err)),
-    }
-}
-
-fn parent_of(path: &Path) -> Result<&Path> {
-    let parent = path.parent().ok_or_else(|| ConfectError::InvalidPath {
-        path: path.to_path_buf(),
-        reason: "no parent directory".into(),
-    })?;
-    fs::create_dir_all(parent).at(parent)?;
-    Ok(parent)
-}
-
-fn refuse_directory(path: &Path) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.is_dir() {
-            return Err(ConfectError::InvalidPath {
-                path: path.to_path_buf(),
-                reason: "a directory is in the way; not replacing it".into(),
-            });
+/// Owner to set, or `None` with a warning when this host cannot map it.
+fn wanted_owner(item: &RestoreItem, warnings: &mut Vec<String>) -> Option<(u32, u32)> {
+    match (resolve_uid(&item.meta.owner), resolve_gid(&item.meta.group)) {
+        (Some(uid), Some(gid)) => Some((uid, gid)),
+        _ => {
+            warnings.push(format!(
+                "{}: owner {}:{} does not exist on this host; left as created",
+                item.path.display(),
+                item.meta.owner,
+                item.meta.group
+            ));
+            None
         }
     }
-    Ok(())
 }
 
-/// Keep a copy of what is about to be replaced; called once the new content is ready.
-fn backup_before_replace(
-    path: &Path,
-    stamp: Option<&str>,
-    report: &mut RestoreReport,
-) -> Result<()> {
-    if let Some(stamp) = stamp {
-        if let Some(saved) = make_backup(path, stamp)? {
-            report.backups.push(saved);
-        }
-    }
-    Ok(())
+fn not_root_warning(item: &RestoreItem) -> String {
+    format!(
+        "{}: cannot set owner {}:{} (not root)",
+        item.path.display(),
+        item.meta.owner,
+        item.meta.group
+    )
 }
 
 fn restore_file(
@@ -191,40 +172,59 @@ fn restore_file(
     backup: Option<&str>,
     report: &mut RestoreReport,
 ) -> Result<()> {
-    let warnings = &mut report.warnings;
-    refuse_directory(&item.path)?;
-    let parent = parent_of(&item.path)?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".confect-restore-")
-        .tempfile_in(parent)
-        .at(parent)?;
+    let (parent, name) = split(&item.path)?;
+    let dir = Dir::open(parent, true)?;
+    if dir.is_directory(name)? {
+        return Err(ConfectError::InvalidPath {
+            path: item.path.clone(),
+            reason: "a directory is in the way; not replacing it".into(),
+        });
+    }
 
-    if item.meta.encrypted {
-        let content = store.read(&item.path, &item.meta)?;
-        temp.write_all(&content).at(&item.path)?;
+    let content = if item.meta.encrypted {
+        Some(store.read(&item.path, &item.meta)?)
     } else {
-        let source = store.absolute(&item.meta.repo_path(&item.path));
-        let mut reader = File::open(&source).at(&source)?;
-        io::copy(&mut reader, temp.as_file_mut()).at(&item.path)?;
+        None
+    };
+    let (temp, mut file) = dir.create_temp()?;
+    let written = (|| -> Result<()> {
+        match &content {
+            Some(content) => file.write_all(content).at(&item.path)?,
+            None => {
+                let source = store.absolute(&item.meta.repo_path(&item.path));
+                let mut reader = File::open(&source).at(&source)?;
+                io::copy(&mut reader, &mut file).at(&item.path)?;
+            }
+        }
+        if let Some((uid, gid)) = wanted_owner(item, &mut report.warnings) {
+            use std::os::unix::fs::MetadataExt;
+            let current = file.metadata().at(&item.path)?;
+            if current.uid() != uid || current.gid() != gid {
+                match fchown(&file, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))) {
+                    Ok(()) => {}
+                    Err(Errno::EPERM) => report.warnings.push(not_root_warning(item)),
+                    Err(errno) => return Err(ConfectError::Unix(errno)),
+                }
+            }
+        }
+        // After chown, which may clear setuid/setgid bits.
+        if let Some(mode) = item.meta.mode_bits() {
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .at(&item.path)?;
+        }
+        file.sync_all().at(&item.path)?;
+        if let Some(stamp) = backup {
+            if let Some(saved) = dir.backup(name, stamp)? {
+                report.backups.push(saved);
+            }
+        }
+        Ok(())
+    })();
+    if let Err(err) = written {
+        dir.remove_temp(&temp);
+        return Err(err);
     }
-
-    if let Some(mode) = item.meta.mode_bits() {
-        temp.as_file()
-            .set_permissions(fs::Permissions::from_mode(mode))
-            .at(&item.path)?;
-    }
-    chown_fd(temp.as_file(), &item.path, &item.meta, warnings)?;
-    // chown may clear setuid/setgid bits; set the mode once more afterwards.
-    if let Some(mode) = item.meta.mode_bits() {
-        temp.as_file()
-            .set_permissions(fs::Permissions::from_mode(mode))
-            .at(&item.path)?;
-    }
-    temp.as_file().sync_all().at(&item.path)?;
-    backup_before_replace(&item.path, backup, report)?;
-    temp.persist(&item.path)
-        .map_err(|e| ConfectError::io_at(&item.path, e.error))?;
-    Ok(())
+    dir.replace(&temp, name)
 }
 
 fn restore_symlink(
@@ -233,171 +233,56 @@ fn restore_symlink(
     backup: Option<&str>,
     report: &mut RestoreReport,
 ) -> Result<()> {
-    refuse_directory(&item.path)?;
-    let parent = parent_of(&item.path)?;
-    let target = store.read_link(&item.path, &item.meta)?;
-    let temp = unique_link(parent, &target)?;
-    let result = chown_nofollow(&temp, &item.meta, &mut report.warnings)
-        .and_then(|_| backup_before_replace(&item.path, backup, report))
-        .and_then(|_| fs::rename(&temp, &item.path).at(&item.path));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-fn unique_link(parent: &Path, target: &Path) -> Result<PathBuf> {
-    for attempt in 0..100u32 {
-        let candidate = parent.join(format!(
-            ".confect-restore-{}-{}",
-            std::process::id(),
-            attempt
-        ));
-        match std::os::unix::fs::symlink(target, &candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(ConfectError::io_at(candidate, err)),
-        }
-    }
-    Err(ConfectError::Other(format!(
-        "cannot create a temporary symlink in {}",
-        parent.display()
-    )))
-}
-
-fn wanted_owner(meta: &EntryMeta) -> (u32, u32) {
-    (
-        resolve_uid(&meta.owner, meta.uid),
-        resolve_gid(&meta.group, meta.gid),
-    )
-}
-
-fn chown_fd(file: &File, path: &Path, meta: &EntryMeta, warnings: &mut Vec<String>) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let (uid, gid) = wanted_owner(meta);
-    let current = file.metadata().at(path)?;
-    if current.uid() == uid && current.gid() == gid {
-        return Ok(());
-    }
-    match nix::unistd::fchown(file, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))) {
-        Ok(()) => Ok(()),
-        Err(nix::errno::Errno::EPERM) => {
-            warnings.push(format!(
-                "{}: cannot set owner {}:{} (not root)",
-                path.display(),
-                meta.owner,
-                meta.group
-            ));
-            Ok(())
-        }
-        Err(errno) => Err(ConfectError::Unix(errno)),
-    }
-}
-
-fn chown_nofollow(path: &Path, meta: &EntryMeta, warnings: &mut Vec<String>) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let (uid, gid) = wanted_owner(meta);
-    let current = fs::symlink_metadata(path).at(path)?;
-    if current.uid() == uid && current.gid() == gid {
-        return Ok(());
-    }
-    match fchownat(
-        nix::fcntl::AT_FDCWD,
-        path,
-        Some(Uid::from_raw(uid)),
-        Some(Gid::from_raw(gid)),
-        AtFlags::AT_SYMLINK_NOFOLLOW,
-    ) {
-        Ok(()) => Ok(()),
-        Err(nix::errno::Errno::EPERM) => {
-            warnings.push(format!(
-                "{}: cannot set owner {}:{} (not root)",
-                path.display(),
-                meta.owner,
-                meta.group
-            ));
-            Ok(())
-        }
-        Err(errno) => Err(ConfectError::Unix(errno)),
-    }
-}
-
-/// Apply mode and owner to a directory, refusing to follow a symlink planted there.
-fn set_attributes_nofollow(
-    path: &Path,
-    meta: &EntryMeta,
-    warnings: &mut Vec<String>,
-) -> Result<()> {
-    let current = fs::symlink_metadata(path).at(path)?;
-    if !current.is_dir() {
+    let (parent, name) = split(&item.path)?;
+    let dir = Dir::open(parent, true)?;
+    if dir.is_directory(name)? {
         return Err(ConfectError::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "expected a directory".into(),
+            path: item.path.clone(),
+            reason: "a directory is in the way; not replacing it".into(),
         });
     }
-    chown_nofollow(path, meta, warnings)?;
-    if let Some(mode) = meta.mode_bits() {
-        let dir = File::open(path).at(path)?;
-        dir.set_permissions(fs::Permissions::from_mode(mode))
-            .at(path)?;
+    let target = store.read_link(&item.path, &item.meta)?;
+    let temp = dir.create_temp_link(&target)?;
+    let prepared = (|| -> Result<()> {
+        if let Some((uid, gid)) = wanted_owner(item, &mut report.warnings) {
+            match dir.chown_link(&temp, uid, gid) {
+                Ok(()) => {}
+                Err(Errno::EPERM) => {
+                    let (current_uid, current_gid) = (
+                        nix::unistd::geteuid().as_raw(),
+                        nix::unistd::getegid().as_raw(),
+                    );
+                    if current_uid != uid || current_gid != gid {
+                        report.warnings.push(not_root_warning(item));
+                    }
+                }
+                Err(errno) => return Err(ConfectError::Unix(errno)),
+            }
+        }
+        if let Some(stamp) = backup {
+            if let Some(saved) = dir.backup(name, stamp)? {
+                report.backups.push(saved);
+            }
+        }
+        Ok(())
+    })();
+    if let Err(err) = prepared {
+        dir.remove_temp(&temp);
+        return Err(err);
     }
-    Ok(())
+    dir.replace(&temp, name)
 }
 
-/// Save the current file next to it without ever writing through a symlink.
-fn make_backup(path: &Path, stamp: &str) -> Result<Option<PathBuf>> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(ConfectError::io_at(path, err)),
-    };
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".confect-backup.{}", stamp));
-    let backup = path.with_file_name(name);
-
-    if meta.file_type().is_symlink() {
-        let target = fs::read_link(path).at(path)?;
-        std::os::unix::fs::symlink(target, &backup).at(&backup)?;
-        return Ok(Some(backup));
+fn set_dir_attributes(item: &RestoreItem, warnings: &mut Vec<String>) -> Result<()> {
+    let dir = Dir::open(&item.path, false)?;
+    let owner = wanted_owner(item, warnings);
+    let (current_uid, current_gid) = dir.owner()?;
+    let chown = owner.filter(|&(uid, gid)| uid != current_uid || gid != current_gid);
+    match dir.set_attributes(chown.map(|o| o.0), chown.map(|o| o.1), None) {
+        Ok(()) => {}
+        Err(Errno::EPERM) => warnings.push(not_root_warning(item)),
+        Err(errno) => return Err(ConfectError::Unix(errno)),
     }
-    if !meta.is_file() {
-        return Ok(None);
-    }
-    let mut source = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)
-        .at(path)?;
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(meta.permissions().mode() & 0o7777)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&backup)
-        .at(&backup)?;
-    io::copy(&mut source, &mut destination).at(&backup)?;
-    Ok(Some(backup))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::make_backup;
-    use std::fs;
-
-    #[test]
-    fn backup_never_writes_through_a_planted_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("app.conf");
-        let victim = dir.path().join("victim");
-        fs::write(&file, "current").unwrap();
-        fs::write(&victim, "precious").unwrap();
-        std::os::unix::fs::symlink(&victim, dir.path().join("app.conf.confect-backup.STAMP"))
-            .unwrap();
-
-        assert!(make_backup(&file, "STAMP").is_err());
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
-
-        let saved = make_backup(&file, "OTHER").unwrap().unwrap();
-        assert_eq!(fs::read_to_string(saved).unwrap(), "current");
-    }
+    dir.set_attributes(None, None, item.meta.mode_bits())
+        .map_err(ConfectError::Unix)
 }

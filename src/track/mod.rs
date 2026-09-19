@@ -2,6 +2,7 @@ pub mod entry;
 pub mod metadata;
 pub mod plan;
 pub mod restore;
+pub mod safe_fs;
 pub mod store;
 pub mod walk;
 

@@ -60,6 +60,7 @@ impl Git {
             .arg("--no-checkout")
             .arg("--origin")
             .arg(remote)
+            .arg("--end-of-options")
             .arg(url)
             .arg(dir);
         let configured = global_config_get("core.sshCommand");
@@ -188,7 +189,7 @@ impl Git {
     }
 
     pub fn remote_url(&self, remote: &str) -> Result<Option<String>> {
-        let output = self.run_status(&["remote", "get-url", remote])?;
+        let output = self.run_status(&["remote", "get-url", "--end-of-options", remote])?;
         if output.status.success() {
             Ok(Some(
                 String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -210,14 +211,20 @@ impl Git {
     }
 
     pub fn add_remote(&self, remote: &str, url: &str) -> Result<()> {
-        self.run("remote add", &["remote", "add", remote, url])?;
+        self.run(
+            "remote add",
+            &["remote", "add", "--end-of-options", remote, url],
+        )?;
         Ok(())
     }
 
     /// Push the current branch; a rejected update is an error, not a silent success.
     pub fn push(&self, remote: &str, branch: &str) -> Result<PushOutcome> {
         let refspec = format!("HEAD:refs/heads/{}", branch);
-        let output = self.run_network("push", &["push", "--porcelain", remote, &refspec])?;
+        let output = self.run_network(
+            "push",
+            &["push", "--porcelain", "--end-of-options", remote, &refspec],
+        )?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let rejected: Vec<&str> = stdout
             .lines()
@@ -248,7 +255,17 @@ impl Git {
     /// Fetch one branch; `Ok(false)` when the remote does not have it.
     pub fn fetch_branch(&self, remote: &str, branch: &str) -> Result<bool> {
         let refspec = format!("+refs/heads/{0}:refs/remotes/{1}/{0}", branch, remote);
-        let output = self.run_network("fetch", &["fetch", "--no-tags", "-q", remote, &refspec])?;
+        let output = self.run_network(
+            "fetch",
+            &[
+                "fetch",
+                "--no-tags",
+                "-q",
+                "--end-of-options",
+                remote,
+                &refspec,
+            ],
+        )?;
         if output.status.success() {
             return Ok(true);
         }
@@ -303,6 +320,7 @@ impl Git {
             &[
                 "ls-remote",
                 "--heads",
+                "--end-of-options",
                 remote,
                 &format!("refs/heads/{}", branch),
             ],
@@ -337,9 +355,48 @@ impl Git {
         Ok(output.lines().map(str::to_string).collect())
     }
 
-    /// Files in `commit` containing any of the fixed strings (binary files skipped).
+    /// Every path that ever existed in any commit.
+    pub fn all_paths_in_history(&self) -> Result<Vec<String>> {
+        let output = self.run(
+            "log",
+            &[
+                "log",
+                "--all",
+                "--format=",
+                "--name-only",
+                "-z",
+                "--no-renames",
+            ],
+        )?;
+        let mut paths: Vec<String> = output
+            .split(['\0', '\n'])
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    /// Abbreviated commits that added or changed `path`, newest first.
+    pub fn commits_touching(&self, path: &str) -> Result<Vec<String>> {
+        let output = self.run(
+            "log",
+            &[
+                "log",
+                "--all",
+                "--format=%h",
+                "--end-of-options",
+                "--",
+                path,
+            ],
+        )?;
+        Ok(output.lines().map(str::to_string).collect())
+    }
+
+    /// Files in `commit` containing any of the fixed strings, binary files included.
     pub fn grep_fixed(&self, commit: &str, needles: &[&str]) -> Result<Vec<String>> {
-        let mut args = vec!["grep", "-I", "-l", "-F", "-z"];
+        let mut args = vec!["grep", "-a", "-l", "-F", "-z"];
         for needle in needles {
             args.push("-e");
             args.push(needle);

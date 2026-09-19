@@ -21,6 +21,8 @@ Whenever confect is about to store a new or changed file in plaintext (`sync`, `
 | SCRAM verifiers | `SCRAM-SHA-256$4096:...` (PostgreSQL, PgBouncer) |
 | MD5 password hashes | `"user" "md5<32 hex digits>"` (PgBouncer `userlist.txt`) |
 | crypt password hashes | `user:$6$...`, `$5$`, `$y$`, `$7$`, `$2a$/$2b$/$2y$`, `$apr1$`, `{SHA}` (`/etc/shadow`, htpasswd, squid) |
+| GnuPG private keys | `(private-key ...`, `(protected-private-key ...`, anything under `private-keys-v1.d` |
+| key stores, by file name | `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `secring.gpg` |
 
 If one is found, nothing is written and the command exits with `1`:
 
@@ -48,8 +50,8 @@ Limits of the guard:
 - It recognizes formats that are secret by construction. Passwords and tokens inside
   ordinary configuration files (`password = ...`, WireGuard `PrivateKey = ...`, API tokens)
   are not detected. Put such files under `encrypt` yourself.
-- Hash lines in comments (`#`, `;`) are ignored; key markers count anywhere. Files with NUL
-  bytes are not checked, and only the first 8 MiB of a file is read.
+- Hash lines in comments (`#`, `;`) are ignored; key markers count anywhere. Whole files are
+  read, binary ones included.
 - It checks files whose content changes. A plaintext copy that is already in the repository
   (for example from confect 1.x) stays until you act; find those with
   [`confect audit`](/commands/audit).
@@ -88,6 +90,11 @@ repository they get an `.age` suffix, for example
 - `status` and `diff` decrypt the stored copy to compare it with the system file.
 - `restore` decrypts and writes the plaintext back with the recorded mode and owner.
 - Directories and symlinks are never encrypted; only regular files are.
+- A stored copy that cannot be decrypted (damaged, or written for a key this host does not
+  have) is never replaced silently: `sync` keeps it and warns. After replacing the age key on
+  purpose, `confect sync --reencrypt` encrypts every file again from the system.
+- An encrypted `x` is stored as `x.age`. If the same category also tracks a plain file named
+  `x.age`, both would land on one stored path; confect refuses and asks you to exclude one.
 
 ::: warning
 A file that was committed in plaintext before you added the `encrypt` pattern is still in the

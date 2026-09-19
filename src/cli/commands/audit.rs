@@ -55,13 +55,20 @@ pub fn scan_tree(root: &Path, categories: Option<&CategoryManager>) -> Vec<Findi
         if !entry.file_type().is_file() {
             continue;
         }
-        let Ok(content) = fs::read(entry.path()) else {
+        let Ok(mut file) = fs::File::open(entry.path()) else {
             continue;
         };
-        if is_age_file(&content) {
+        let mut head = [0u8; 64];
+        let read = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
+        if is_age_file(&head[..read]) {
             continue;
         }
-        if let Some(what) = secrets::detect(&content) {
+        let found = secrets::detect_name(entry.path()).or_else(|| {
+            fs::File::open(entry.path())
+                .ok()
+                .and_then(|f| secrets::detect_reader(f).ok().flatten())
+        });
+        if let Some(what) = found {
             let relative = entry
                 .path()
                 .strip_prefix(root)
@@ -82,8 +89,26 @@ pub fn scan_tree(root: &Path, categories: Option<&CategoryManager>) -> Vec<Findi
 fn scan_history(repo: &Repository, categories: Option<&CategoryManager>) -> Result<Vec<Finding>> {
     let git = repo.git();
     let mut found: BTreeMap<String, Finding> = BTreeMap::new();
+    for path in git.all_paths_in_history()? {
+        if let Some(what) = secrets::detect_name(Path::new(&path)) {
+            let commits = git.commits_touching(&path)?;
+            found.insert(
+                path.clone(),
+                Finding {
+                    allowed: allowed(categories, &path),
+                    path,
+                    what,
+                    commits,
+                },
+            );
+        }
+    }
+    let named: std::collections::HashSet<String> = found.keys().cloned().collect();
     for commit in git.all_commits()? {
         for path in git.grep_fixed(&commit, secrets::HISTORY_NEEDLES)? {
+            if named.contains(&path) {
+                continue;
+            }
             let content = git.show_blob(&commit, &path)?;
             if is_age_file(&content) {
                 continue;

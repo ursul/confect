@@ -15,6 +15,7 @@ confect sync [OPTIONS]
 | `-m`, `--message <MSG>` | Commit message (default: a summary of the changes) |
 | `--no-push` | Do not push, whatever `auto_push` says |
 | `--push` | Push even if `auto_push = false`; fails when no remote is configured |
+| `--reencrypt` | Encrypt every encrypted file again from the system, for example after replacing the age key |
 
 ## Examples
 
@@ -28,8 +29,9 @@ confect sync --no-push
 
 1. Makes sure the repository directory is private (`0700`) and says so if it had to fix it.
 2. Compares every category with the system, as [`status`](/commands/status) does.
-3. Runs the secret guard. If a new or changed file looks like a plaintext secret, `sync`
-   stops before writing anything and exits with `1`:
+3. Runs the secret guard. If a new or changed file looks like a plaintext secret, or two
+   tracked paths would share one stored path, `sync` stops before writing anything and exits
+   with `1`:
 
    ```
    Plaintext secrets would be stored in the repository:

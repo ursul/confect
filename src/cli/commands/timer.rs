@@ -17,7 +17,29 @@ pub struct TimerOptions {
     pub remove: bool,
 }
 
+/// Unit files are line-based: a value with a newline would add directives of its own.
+fn validate(options: &TimerOptions) -> Result<()> {
+    if options.message.chars().any(char::is_control) {
+        return Err(ConfectError::Other(
+            "the timer message must be a single line without control characters".into(),
+        ));
+    }
+    let schedule_ok = !options.schedule.is_empty()
+        && options
+            .schedule
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " *:/,.~-".contains(c));
+    if !schedule_ok {
+        return Err(ConfectError::Other(format!(
+            "'{}' is not an OnCalendar expression",
+            options.schedule
+        )));
+    }
+    Ok(())
+}
+
 pub fn run(explicit_repo: Option<&Path>, options: TimerOptions) -> Result<()> {
+    validate(&options)?;
     let root = nix::unistd::Uid::effective().is_root();
     let user = options.user || !root;
     let dir = if user {
@@ -131,7 +153,24 @@ fn systemctl(user: bool, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::quote;
+    use super::{quote, validate, TimerOptions};
+
+    fn options(schedule: &str, message: &str) -> TimerOptions {
+        TimerOptions {
+            schedule: schedule.into(),
+            message: message.into(),
+            user: true,
+            remove: false,
+        }
+    }
+
+    #[test]
+    fn injected_directives_are_rejected() {
+        assert!(validate(&options("daily", "Automatic backup")).is_ok());
+        assert!(validate(&options("Mon..Fri *-*-* 03:00:00", "x")).is_ok());
+        assert!(validate(&options("daily", "sync\n[Service]\nExecStart=/bin/id")).is_err());
+        assert!(validate(&options("daily\nExecStart=/bin/id", "x")).is_err());
+    }
 
     #[test]
     fn exec_start_values_are_quoted() {

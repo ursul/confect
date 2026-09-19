@@ -83,13 +83,23 @@ impl Ctx {
     }
 }
 
-/// Stop before anything is stored when the plan contains plaintext secrets.
+/// Stop before anything is stored when the plan contains plaintext secrets or
+/// colliding paths.
 pub fn guard_secrets(plan: &Plan) -> Result<()> {
-    if plan.secrets.is_empty() {
-        return Ok(());
+    for conflict in &plan.conflicts {
+        ui::error_line(conflict);
     }
-    ui::print_secrets(&plan.secrets);
-    Err(ConfectError::PlaintextSecrets(plan.secrets.len()))
+    if !plan.secrets.is_empty() {
+        ui::print_secrets(&plan.secrets);
+        return Err(ConfectError::PlaintextSecrets(plan.secrets.len()));
+    }
+    if !plan.conflicts.is_empty() {
+        return Err(ConfectError::Other(format!(
+            "{} path(s) collide in the repository; nothing was written",
+            plan.conflicts.len()
+        )));
+    }
+    Ok(())
 }
 
 pub fn report_failures(failures: &[String]) -> Result<()> {

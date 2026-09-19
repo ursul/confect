@@ -19,16 +19,23 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
   the repository holds `<path>.age` and never the plaintext. In 1.x the flag
   printed "(encrypted)" and stored the file as is.
 - `sync`, `add` and category changes refuse to store private keys (PEM,
-  OpenSSH, PGP, age, PuTTY, JSON Web Keys), SCRAM verifiers, MD5 userlists and
+  OpenSSH, PGP, GnuPG, age, PuTTY, JSON Web Keys), key stores (`.p12`, `.pfx`,
+  `.jks`, `.keystore`, `.kdbx`), SCRAM verifiers, MD5 userlists and
   htpasswd/shadow hashes as plaintext, and write nothing when one is found.
-  `allow_plaintext` patterns make deliberate exceptions.
+  Whole files are scanned, binary ones included. `allow_plaintext` patterns
+  make deliberate exceptions.
 - New `confect audit [--history]` finds plaintext secrets already in the
   repository or anywhere in its history; files allowed with `allow_plaintext`
   are listed separately.
 - The repository directory is created (and kept by `sync`) with mode 0700: git
   objects are world-readable and hold every past version of every file.
-- `restore` writes through a temporary file and `rename`, never follows a
-  symlink planted at the target, and creates backups with `O_EXCL|O_NOFOLLOW`.
+- `restore` resolves parent directories one component at a time and works
+  through directory descriptors: a symlink on the way is followed only when
+  root or the restoring user owns it, so a link planted by someone else cannot
+  redirect a write made as root. Files are written to a temporary file and
+  renamed into place; backups are created with `O_EXCL|O_NOFOLLOW`.
+- Owners are restored by name; a user or group missing on the host is not
+  replaced by the stored numeric ID, which could belong to someone else.
 - `self-update` verifies the published SHA-256 before replacing the binary and
   no longer pulls in the vulnerable `tar` version of the `self_update` crate.
 
@@ -46,6 +53,9 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
   repository, for monitoring; `audit` exits with 3 when it finds secrets.
   (2 stays reserved for invalid arguments.)
 - `[global] network_timeout` bounds every git network operation.
+- `sync --reencrypt` encrypts every encrypted file again, for example after
+  replacing the age key. Without it, a stored copy that cannot be decrypted is
+  kept and reported instead of being replaced.
 - A lock on the repository serializes concurrent confect runs.
 
 ### Changed
@@ -92,6 +102,9 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
   stored copies are kept. A tracked path that disappears keeps its copies too.
 - `sync` with nothing to do exited with an error.
 - `add` without `-c` copied files into a category that did not exist.
+- `setup-timer` rejects messages and schedules that would add lines to the
+  unit files; git receives user-supplied URLs and names after
+  `--end-of-options`.
 
 ### Removed
 

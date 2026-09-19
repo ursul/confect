@@ -46,11 +46,16 @@ Paths that already match are skipped. With `--dry-run`, confect stops after the 
   and are renamed into place, so readers never see a half-written file.
 - A symlink at the target path is replaced, never written through. Symlinks are restored as
   symlinks.
+- Parent directories are opened one by one without following symlinks. A symlink on the way
+  is followed only when root or the user running `restore` owns it (merged-`/usr` links such
+  as `/lib` are owned by root); a link planted by another user makes that path fail instead
+  of redirecting a write made as root.
 - A directory where a file should be is not replaced; that path fails.
 - Directories are created as needed; their mode and owner are applied last.
-- Owners are looked up by name first, then by the stored uid/gid, so files keep the right
-  owner on a machine where the IDs differ. As a non-root user, owners cannot be changed and
-  confect warns.
+- Owners are looked up by name, so files keep the right owner on a machine where the IDs
+  differ. If the user or group does not exist on this machine, the file keeps the owner it
+  was created with and confect warns: the stored numeric ID could belong to somebody else
+  here. As a non-root user, owners cannot be changed and confect warns.
 - Encrypted files are decrypted with the age identity.
 
 `restore` never deletes anything: files that exist on the system but not in the repository

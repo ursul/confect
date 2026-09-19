@@ -143,3 +143,14 @@ fn pull_refuses_to_run_over_uncommitted_changes() {
     let out = env.code(&["pull"], 1);
     assert!(out.contains("run 'confect sync' first"), "{}", out);
 }
+
+#[test]
+fn option_like_urls_are_rejected() {
+    let env = Env::new();
+    let out = env.code(
+        &["init", "--host", HOST, "--from=--upload-pack=touch /tmp/x"],
+        1,
+    );
+    assert!(out.contains("is not a repository URL"), "{}", out);
+    assert!(!env.repo().exists());
+}

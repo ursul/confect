@@ -101,6 +101,7 @@ fn scope_for(name: &str, pattern: &str) -> Scope {
     Scope {
         category: Some(name.to_string()),
         paths: vec![glob_base(pattern)],
+        ..Scope::default()
     }
 }
 
@@ -177,6 +178,7 @@ fn edit_patterns(ctx: &mut Ctx, command: PatternCommands, list: PatternList) -> 
         Scope {
             category: Some(name.clone()),
             paths: Vec::new(),
+            ..Scope::default()
         }
     };
     let plan = ctx.commit_category_change_for(&scope, Some(&pattern))?;
@@ -289,6 +291,7 @@ fn create(
     ctx.commit_category_change(&Scope {
         category: Some(name.to_string()),
         paths: Vec::new(),
+        ..Scope::default()
     })?;
     ui::success(&format!("Created category '{}'", name));
     println!("Run {} to commit.", style("confect sync").cyan());

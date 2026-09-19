@@ -51,7 +51,8 @@ fn run() -> Result<i32> {
             message,
             no_push,
             push,
-        } => sync::run(repo, message, no_push, push)?,
+            reencrypt,
+        } => sync::run(repo, message, no_push, push, reencrypt)?,
         Commands::Restore {
             paths,
             category,

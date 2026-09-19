@@ -63,6 +63,8 @@ pub struct Plan {
     pub changes: Vec<Change>,
     pub warnings: Vec<String>,
     pub secrets: Vec<SecretFinding>,
+    /// Paths whose stored copies would collide; nothing may be written until resolved.
+    pub conflicts: Vec<String>,
 }
 
 impl Plan {
@@ -77,6 +79,8 @@ pub struct Scope {
     pub category: Option<String>,
     /// Limit to these system paths and everything below them.
     pub paths: Vec<PathBuf>,
+    /// Encrypt every encrypted file again from the system (after replacing the age key).
+    pub reencrypt: bool,
 }
 
 impl Scope {
@@ -132,7 +136,32 @@ pub fn build(
             }
         }
 
+        // `x` stored encrypted lands on `x.age`, which is also where a plain `x.age` goes.
+        let mut colliding: Vec<PathBuf> = Vec::new();
         for (path, entry) in &scan.entries {
+            if entry.kind == Kind::File && category.should_encrypt(path) {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(".age");
+                let sidecar = PathBuf::from(sidecar);
+                if scan.entries.contains_key(&sidecar) && !category.should_encrypt(&sidecar) {
+                    plan.conflicts.push(format!(
+                        "{} is stored encrypted as {}.age, where the tracked file {} is stored too; \
+                         exclude one of them",
+                        path.display(),
+                        path.display(),
+                        sidecar.display()
+                    ));
+                    colliding.push(path.clone());
+                    colliding.push(sidecar);
+                }
+            }
+        }
+
+        for (path, entry) in &scan.entries {
+            if colliding.contains(path) {
+                stored.remove(path);
+                continue;
+            }
             // A path two legacy categories cover belongs to the more specific one; the
             // other category's copy is purged below.
             let owned = categories
@@ -142,11 +171,20 @@ pub fn build(
                 continue;
             }
             let previous = stored.remove(path);
-            examine(category, path, entry, previous, store, &mut plan)?;
+            examine(
+                category,
+                path,
+                entry,
+                previous,
+                store,
+                scope.reencrypt,
+                &mut plan,
+            )?;
         }
 
         for (path, meta) in stored {
-            if !scope.includes_path(&path) || scan.is_protected(&path) {
+            if !scope.includes_path(&path) || scan.is_protected(&path) || colliding.contains(&path)
+            {
                 continue;
             }
             let action = if path_exists(&path) {
@@ -207,6 +245,7 @@ fn examine(
     entry: &SysEntry,
     previous: Option<EntryMeta>,
     store: &Store,
+    reencrypt: bool,
     plan: &mut Plan,
 ) -> Result<()> {
     let encrypt = entry.kind == Kind::File && category.should_encrypt(path);
@@ -214,7 +253,7 @@ fn examine(
     let (content_changed, attributes_changed) = match &previous {
         None => (true, true),
         Some(meta) => {
-            let content = match content_differs(entry, meta, encrypt, store) {
+            let content = match content_differs(entry, meta, encrypt, store, reencrypt) {
                 Ok(changed) => changed,
                 Err(Unreadable(reason)) => {
                     plan.warnings.push(format!(
@@ -234,16 +273,17 @@ fn examine(
     }
 
     if content_changed && entry.kind == Kind::File && !encrypt && !category.allows_plaintext(path) {
-        match read_head(path) {
-            Ok(head) => {
-                if let Some(what) = secrets::detect(&head) {
-                    plan.secrets.push(SecretFinding {
-                        path: path.to_path_buf(),
-                        category: category.name.clone(),
-                        what,
-                    });
-                }
-            }
+        let found = match secrets::detect_name(path) {
+            Some(what) => Ok(Some(what)),
+            None => fs::File::open(path).and_then(secrets::detect_reader),
+        };
+        match found {
+            Ok(Some(what)) => plan.secrets.push(SecretFinding {
+                path: path.to_path_buf(),
+                category: category.name.clone(),
+                what,
+            }),
+            Ok(None) => {}
             Err(err) => {
                 let outcome = if previous.is_some() {
                     "its stored copy is kept"
@@ -286,6 +326,7 @@ fn content_differs(
     meta: &EntryMeta,
     encrypt: bool,
     store: &Store,
+    reencrypt: bool,
 ) -> std::result::Result<bool, Unreadable> {
     if meta.kind != entry.kind || meta.encrypted != encrypt {
         return Ok(true);
@@ -297,11 +338,19 @@ fn content_differs(
             Ok(stored.as_deref() != entry.target.as_deref())
         }
         Kind::File if meta.encrypted => {
+            if reencrypt {
+                return Ok(true);
+            }
             if store.crypto().has_identity() {
-                let stored = match store.read(&entry.path, meta) {
-                    Ok(stored) => stored,
-                    Err(_) => return Ok(true),
-                };
+                // A stored copy that cannot be decrypted is never silently replaced: it
+                // may be the only good one. `sync --reencrypt` replaces it on purpose.
+                let stored = store.read(&entry.path, meta).map_err(|e| {
+                    Unreadable(format!(
+                        "the stored copy cannot be decrypted ({}); if the age key was \
+                         replaced, run 'confect sync --reencrypt'",
+                        e
+                    ))
+                })?;
                 let current = fs::read(&entry.path).map_err(|e| Unreadable(e.to_string()))?;
                 Ok(stored != current)
             } else {
@@ -316,16 +365,6 @@ fn content_differs(
             Err(_) => Ok(true),
         },
     }
-}
-
-fn read_head(path: &Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-    let mut buf = Vec::new();
-    file.by_ref()
-        .take(secrets::SCAN_LIMIT as u64)
-        .read_to_end(&mut buf)?;
-    Ok(buf)
 }
 
 /// Write the plan into the repository working tree and the metadata index.

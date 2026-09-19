@@ -18,6 +18,20 @@ pub fn run(args: InitArgs, explicit_repo: Option<&Path>) -> Result<()> {
         (None, false, None) => config.repo_path(),
     };
     let host = args.host.clone().unwrap_or_else(default_host);
+    for url in [&args.remote, &args.from].into_iter().flatten() {
+        if url.starts_with('-') || url.is_empty() {
+            return Err(ConfectError::Other(format!(
+                "'{}' is not a repository URL",
+                url
+            )));
+        }
+    }
+    if config.global.default_remote.starts_with('-') {
+        return Err(ConfectError::Config(format!(
+            "default_remote '{}' is not a remote name",
+            config.global.default_remote
+        )));
+    }
 
     if path.join(".git").exists() {
         add_remote_to_existing(&path, args.remote.as_deref())?;
