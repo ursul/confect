@@ -135,3 +135,11 @@ fn diverged_branches_are_reported_not_merged() {
     let out = env.code(&["pull"], 1);
     assert!(out.contains("diverged"), "{}", out);
 }
+
+#[test]
+fn pull_refuses_to_run_over_uncommitted_changes() {
+    let env = Env::new();
+    with_remote(&env);
+    let out = env.code(&["pull"], 1);
+    assert!(out.contains("run 'confect sync' first"), "{}", out);
+}

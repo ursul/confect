@@ -62,7 +62,8 @@ impl Git {
             .arg(remote)
             .arg(url)
             .arg(dir);
-        apply_ssh_defaults(&mut command, None);
+        let configured = global_config_get("core.sshCommand");
+        apply_ssh_defaults(&mut command, configured.as_deref());
         let output = run_with_timeout(command, Duration::from_secs(timeout_secs), "clone")?;
         check("clone", &output)?;
         Ok(Self::new(dir, timeout_secs))
@@ -261,6 +262,15 @@ impl Git {
         })
     }
 
+    /// Whether the working tree or index differs from HEAD.
+    pub fn is_dirty(&self) -> Result<bool> {
+        let output = self.run(
+            "status",
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        Ok(!output.trim().is_empty())
+    }
+
     /// Fast-forward to the fetched branch; divergence is reported instead of merged.
     pub fn fast_forward(&self, remote: &str, branch: &str) -> Result<bool> {
         let upstream = format!("{}/{}", remote, branch);
@@ -354,6 +364,16 @@ impl Git {
         check("show", &output)?;
         Ok(output.stdout)
     }
+}
+
+/// A setting from the user's or system git configuration (no repository yet).
+fn global_config_get(key: &str) -> Option<String> {
+    let output = base_command()
+        .args(["config", "--get", key])
+        .output()
+        .ok()?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !value.is_empty()).then_some(value)
 }
 
 fn base_command() -> Command {

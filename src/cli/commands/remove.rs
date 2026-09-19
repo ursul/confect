@@ -15,8 +15,21 @@ pub fn run(explicit_repo: Option<&Path>, paths: Vec<PathBuf>) -> Result<()> {
 
     let mut scope_paths = Vec::new();
     let mut touched = Vec::new();
-    for path in paths {
-        let path = absolute(&path)?;
+    for raw in paths {
+        // A relative 1.x category path can only be matched as typed.
+        let typed = raw.to_string_lossy().into_owned();
+        let relative_owner = ctx
+            .categories
+            .list()
+            .find(|c| !typed.starts_with('/') && c.paths.contains(&typed))
+            .map(|c| c.name.clone());
+        if let Some(name) = relative_owner {
+            ctx.categories.get_mut(&name)?.paths.retain(|p| p != &typed);
+            ctx.categories.save()?;
+            println!("  {} {} (removed from '{}')", style("-").red(), typed, name);
+            continue;
+        }
+        let path = absolute(&raw)?;
         let pattern = path.to_string_lossy().into_owned();
 
         let owner = ctx
@@ -27,8 +40,10 @@ pub fn run(explicit_repo: Option<&Path>, paths: Vec<PathBuf>) -> Result<()> {
         if let Some(name) = owner {
             let cat = ctx.categories.get_mut(&name)?;
             cat.paths.retain(|p| p != &pattern);
-            cat.encrypt.retain(|p| p != &pattern);
-            cat.allow_plaintext.retain(|p| p != &pattern);
+            let below = |p: &String| p.starts_with('/') && Path::new(p).starts_with(&path);
+            cat.encrypt.retain(|p| !below(p));
+            cat.allow_plaintext.retain(|p| !below(p));
+            cat.exclude.retain(|p| !below(p));
             println!(
                 "  {} {} (removed from '{}')",
                 style("-").red(),

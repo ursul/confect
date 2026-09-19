@@ -155,13 +155,24 @@ fn audit_finds_plaintext_secrets_in_files_and_history() {
     ]);
     env.ok(&["sync"]);
 
-    let out = env.code(&["audit"], 2);
+    let out = env.code(&["audit"], 0);
+    assert!(out.contains("Allowed in plaintext on purpose"), "{}", out);
+    assert!(out.contains("test-key.pem"), "{}", out);
+
+    env.ok(&[
+        "category",
+        "allow-plaintext",
+        "remove",
+        "app",
+        sample.to_str().unwrap(),
+    ]);
+    let out = env.code(&["audit"], 3);
     assert!(out.contains("test-key.pem"), "{}", out);
 
     env.ok(&["remove", sample.to_str().unwrap()]);
     env.ok(&["sync"]);
     env.code(&["audit"], 0);
-    let out = env.code(&["audit", "--history"], 2);
+    let out = env.code(&["audit", "--history"], 3);
     assert!(out.contains("test-key.pem"), "{}", out);
     assert!(out.contains("commit"), "{}", out);
 }

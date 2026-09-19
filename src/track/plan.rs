@@ -245,10 +245,16 @@ fn examine(
                 }
             }
             Err(err) => {
+                let outcome = if previous.is_some() {
+                    "its stored copy is kept"
+                } else {
+                    "it is not stored"
+                };
                 plan.warnings.push(format!(
-                    "cannot read {}: {}; it is not stored",
+                    "cannot read {}: {}; {}",
                     path.display(),
-                    err
+                    err,
+                    outcome
                 ));
                 return Ok(());
             }

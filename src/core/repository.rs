@@ -65,13 +65,12 @@ impl Repository {
     }
 
     /// Create a new repository with the host branch checked out.
-    pub fn create(path: &Path, host: &str) -> Result<Self> {
+    pub fn create(path: &Path, host: &str, config: Config) -> Result<Self> {
         validate_host(host)?;
         if path.join(".git").exists() {
             return Err(ConfectError::AlreadyInitialized(path.to_path_buf()));
         }
         create_private_dir(path)?;
-        let config = Config::load()?;
         let git = Git::init(path, &branch_for(host))?;
         let git = Git::new(git.dir(), config.global.network_timeout);
         let repo_config = new_repo_config(host);
@@ -87,7 +86,7 @@ impl Repository {
 
     /// Clone an existing configuration repository and switch to this host's branch,
     /// starting the branch from scratch when the remote does not have it yet.
-    pub fn clone_from(url: &str, path: &Path, host: &str) -> Result<(Self, bool)> {
+    pub fn clone_from(url: &str, path: &Path, host: &str, config: Config) -> Result<(Self, bool)> {
         validate_host(host)?;
         if path.join(".git").exists() {
             return Err(ConfectError::AlreadyInitialized(path.to_path_buf()));
@@ -98,7 +97,6 @@ impl Repository {
                 reason: "the directory is not empty".into(),
             });
         }
-        let config = Config::load()?;
         let remote = config.global.default_remote.clone();
         create_private_dir(path)?;
         let git = Git::clone_bare_checkout(url, path, &remote, config.global.network_timeout)?;

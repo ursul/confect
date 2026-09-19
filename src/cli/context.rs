@@ -54,7 +54,22 @@ impl Ctx {
     /// Nothing is written — not even the category change — when the result would put a
     /// plaintext secret into the repository.
     pub fn commit_category_change(&mut self, scope: &Scope) -> Result<Plan> {
-        let plan = self.plan(scope)?;
+        self.commit_category_change_for(scope, None)
+    }
+
+    /// Like [`Ctx::commit_category_change`], limited to the paths `pattern` covers, so a
+    /// pattern edit does not also record unrelated changes of the category.
+    pub fn commit_category_change_for(
+        &mut self,
+        scope: &Scope,
+        pattern: Option<&str>,
+    ) -> Result<Plan> {
+        let mut plan = self.plan(scope)?;
+        if let Some(pattern) = pattern {
+            let covered = |path: &Path| crate::core::category::pattern_covers(pattern, path);
+            plan.changes.retain(|c| covered(&c.path));
+            plan.secrets.retain(|s| covered(&s.path));
+        }
         ui::print_warnings(&plan.warnings);
         guard_secrets(&plan)?;
         self.categories.save()?;

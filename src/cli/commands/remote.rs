@@ -17,6 +17,12 @@ pub fn pull(explicit_repo: Option<&Path>, then_restore: bool, yes: bool) -> Resu
             remote
         )));
     }
+    if repo.git().is_dirty()? {
+        return Err(ConfectError::Other(
+            "the repository has changes that are not committed yet; run 'confect sync' first"
+                .into(),
+        ));
+    }
     if !repo.git().fetch_branch(&remote, &branch)? {
         ui::info(&format!(
             "{} has no branch {} yet; nothing to pull",

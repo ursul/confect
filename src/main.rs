@@ -8,8 +8,9 @@ use confect::cli::commands::{
 use confect::cli::{Cli, Commands};
 use confect::Result;
 
-/// Exit status when `status --exit-code` or `audit` found something.
-const EXIT_FOUND: i32 = 2;
+/// Exit status when `status --exit-code` or `audit` found something. Not 2: clap uses
+/// 2 for usage errors, and monitoring must not mistake a typo for a finding.
+const EXIT_FOUND: i32 = 3;
 
 fn main() {
     match run() {

@@ -45,14 +45,19 @@ pub fn run(explicit_repo: Option<&Path>, command: CategoryCommands) -> Result<()
             ctx.categories.get(&name)?;
             ctx.categories.check_overlap(&pattern)?;
             ctx.categories.get_mut(&name)?.paths.push(pattern.clone());
-            ctx.commit_category_change(&scope_for(&name, &pattern))?;
+            ctx.commit_category_change_for(&scope_for(&name, &pattern), Some(&pattern))?;
             ui::success(&format!("Added {} to '{}'", pattern, name));
             Ok(())
         }
         CategoryCommands::RemovePath { name, path } => {
             let _lock = ctx.repo.lock()?;
-            let pattern = absolute_pattern(&path)?;
             let cat = ctx.categories.get_mut(&name)?;
+            // 1.x accepted relative paths; those can only be matched as typed.
+            let pattern = if cat.paths.contains(&path) {
+                path.clone()
+            } else {
+                absolute_pattern(&path)?
+            };
             if !cat.paths.contains(&pattern) {
                 return Err(ConfectError::Other(format!(
                     "'{}' has no path {}",
@@ -60,7 +65,12 @@ pub fn run(explicit_repo: Option<&Path>, command: CategoryCommands) -> Result<()
                 )));
             }
             cat.paths.retain(|p| p != &pattern);
-            let plan = ctx.commit_category_change(&scope_for(&name, &pattern))?;
+            let plan = if pattern.starts_with('/') {
+                ctx.commit_category_change_for(&scope_for(&name, &pattern), Some(&pattern))?
+            } else {
+                ctx.categories.save()?;
+                crate::track::Plan::default()
+            };
             ui::success(&format!(
                 "Removed {} from '{}' and dropped {} stored path(s)",
                 pattern,
@@ -169,7 +179,7 @@ fn edit_patterns(ctx: &mut Ctx, command: PatternCommands, list: PatternList) -> 
             paths: Vec::new(),
         }
     };
-    let plan = ctx.commit_category_change(&scope)?;
+    let plan = ctx.commit_category_change_for(&scope, Some(&pattern))?;
     ui::success(&format!(
         "{} {} {} the {} of '{}'; {} stored path(s) updated",
         if add { "Added" } else { "Removed" },

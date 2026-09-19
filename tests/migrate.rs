@@ -79,11 +79,11 @@ fn migrate_indexes_files_restricts_permissions_and_reports_secrets() {
     env.ok(&["migrate"]);
 
     // The key is already stored in plaintext: sync does not re-add it, audit reports it.
-    env.code(&["audit"], 2);
+    env.code(&["audit"], 3);
     env.ok(&["category", "exclude", "add", "app", "*.key"]);
     env.ok(&["sync", "--no-push"]);
     env.code(&["audit"], 0);
-    env.code(&["audit", "--history"], 2);
+    env.code(&["audit", "--history"], 3);
 }
 
 #[test]
@@ -126,4 +126,27 @@ fn overlapping_legacy_categories_keep_one_copy_in_the_more_specific_one() {
     let out = env.ok(&["sync", "--no-push"]);
     assert!(out.contains("Nothing to commit"), "{}", out);
     assert_eq!(env.head_count(), before);
+}
+
+#[test]
+fn relative_legacy_paths_are_ignored_safely_and_removable() {
+    let env = Env::new();
+    let repo = legacy_repo(&env);
+    let categories = fs::read_to_string(repo.join(".confect/categories.toml")).unwrap();
+    fs::write(
+        repo.join(".confect/categories.toml"),
+        categories.replace("paths = [", "paths = [\"relative/dir\", "),
+    )
+    .unwrap();
+    env.ok(&["migrate", "--yes"]);
+    env.ok(&["category", "exclude", "add", "app", "*.key"]);
+    let out = env.ok(&["sync", "--no-push"]);
+    assert!(out.contains("relative path 'relative/dir'"), "{}", out);
+    assert!(env
+        .stored("app", &env.sys_path("etc/app/app.conf"))
+        .exists());
+
+    env.ok(&["remove", "relative/dir"]);
+    let out = env.ok(&["sync", "--no-push"]);
+    assert!(!out.contains("relative path"), "{}", out);
 }

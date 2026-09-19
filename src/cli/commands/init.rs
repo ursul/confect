@@ -20,7 +20,12 @@ pub fn run(args: InitArgs, explicit_repo: Option<&Path>) -> Result<()> {
     let host = args.host.clone().unwrap_or_else(default_host);
 
     if path.join(".git").exists() {
-        return add_remote_to_existing(&path, args.remote.as_deref());
+        add_remote_to_existing(&path, args.remote.as_deref())?;
+        if args.path.is_some() || args.system {
+            config.global.repo_path = Some(path);
+            config.save()?;
+        }
+        return Ok(());
     }
 
     let repo = if let Some(url) = &args.from {
@@ -29,7 +34,7 @@ pub fn run(args: InitArgs, explicit_repo: Option<&Path>) -> Result<()> {
             style(url).cyan(),
             style(path.display()).cyan()
         );
-        let (repo, existing) = Repository::clone_from(url, &path, &host)?;
+        let (repo, existing) = Repository::clone_from(url, &path, &host, config.clone())?;
         if existing {
             ui::success(&format!(
                 "Checked out branch {} from the remote",
@@ -46,7 +51,7 @@ pub fn run(args: InitArgs, explicit_repo: Option<&Path>) -> Result<()> {
         }
         repo
     } else {
-        let repo = Repository::create(&path, &host)?;
+        let repo = Repository::create(&path, &host, config.clone())?;
         repo.git().add_all()?;
         repo.git().commit(
             &format!("Initialize confect repository for {}", host),
@@ -74,8 +79,8 @@ pub fn run(args: InitArgs, explicit_repo: Option<&Path>) -> Result<()> {
     println!();
     println!("Next steps:");
     if args.from.is_some() {
-        println!("  confect status               # compare the stored files with this system");
-        println!("  confect restore              # write them to this system");
+        println!("  confect restore --dry-run    # see what would be written to this system");
+        println!("  confect restore              # write it");
     } else {
         println!("  confect add /etc/nginx -c nginx --create-category");
         println!("  confect sync -m \"Initial configuration\"");

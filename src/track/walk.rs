@@ -33,6 +33,19 @@ impl Scan {
 pub fn scan_category(category: &Category, repo_path: &Path) -> Scan {
     let mut scan = Scan::default();
     for pattern in &category.paths {
+        if !pattern.starts_with('/') {
+            // A relative 1.x path would resolve against whatever directory confect runs
+            // in; keep every stored copy of the category until it is fixed.
+            scan.protect(
+                Path::new("/"),
+                format!(
+                    "category '{}' has a relative path '{}', which is ignored; remove it with \
+                     'confect category remove-path {} {}' and add the absolute path",
+                    category.name, pattern, category.name, pattern
+                ),
+            );
+            continue;
+        }
         if has_glob(pattern) {
             let options = MatchOptions {
                 case_sensitive: true,
@@ -123,7 +136,7 @@ fn visit(category: &Category, repo_path: &Path, root: &Path, scan: &mut Scan) {
         };
         let skip = category.is_excluded(path)
             || path.starts_with(repo_path)
-            || (is_dir && name == ".git" && item.depth() > 0)
+            || (name == ".git" && item.depth() > 0)
             || (!is_dir && is_backup_name(name));
         if skip {
             if is_dir {

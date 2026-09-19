@@ -110,7 +110,7 @@ fn status_reports_new_modified_deleted_and_permission_changes() {
     env.write("etc/app/new.conf", "new\n");
     env.chmod(&keep, 0o600);
 
-    let out = env.code(&["status", "--exit-code"], 2);
+    let out = env.code(&["status", "--exit-code"], 3);
     assert!(out.contains(&format!("M {}", edit.display())), "{}", out);
     assert!(out.contains(&format!("D {}", gone.display())), "{}", out);
     assert!(
@@ -394,4 +394,22 @@ fn a_second_run_waits_for_the_repository_lock() {
         out
     );
     assert!(started.elapsed() >= std::time::Duration::from_millis(500));
+}
+
+#[test]
+fn a_pattern_edit_does_not_record_unrelated_changes() {
+    let env = Env::initialized();
+    let conf = env.write("etc/app/app.conf", "v1\n");
+    env.write("etc/app/debug.log", "log\n");
+    env.ok(&["add", &env.arg("etc/app"), "-c", "app", "--create-category"]);
+    env.ok(&["sync"]);
+
+    fs::write(&conf, "unreviewed edit\n").unwrap();
+    env.ok(&["category", "exclude", "add", "app", "*.log"]);
+    assert_eq!(
+        fs::read_to_string(env.stored("app", &conf)).unwrap(),
+        "v1\n"
+    );
+    let out = env.code(&["status", "--exit-code"], 3);
+    assert!(out.contains(&format!("M {}", conf.display())), "{}", out);
 }

@@ -23,7 +23,8 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
   htpasswd/shadow hashes as plaintext, and write nothing when one is found.
   `allow_plaintext` patterns make deliberate exceptions.
 - New `confect audit [--history]` finds plaintext secrets already in the
-  repository or anywhere in its history.
+  repository or anywhere in its history; files allowed with `allow_plaintext`
+  are listed separately.
 - The repository directory is created (and kept by `sync`) with mode 0700: git
   objects are world-readable and hold every past version of every file.
 - `restore` writes through a temporary file and `rename`, never follows a
@@ -41,8 +42,9 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
 - `category exclude|encrypt|allow-plaintext add|remove`, and `--exclude` /
   `--allow-plaintext` on `category create`.
 - `confect key generate|show`, `confect push`, `confect migrate`.
-- `status --exit-code` exits with 2 when the system differs from the
-  repository, for monitoring.
+- `status --exit-code` exits with 3 when the system differs from the
+  repository, for monitoring; `audit` exits with 3 when it finds secrets.
+  (2 stays reserved for invalid arguments.)
 - `[global] network_timeout` bounds every git network operation.
 - A lock on the repository serializes concurrent confect runs.
 
@@ -53,7 +55,8 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
   with `BatchMode` so a missing key fails instead of hanging.
 - `sync` pushes only when `auto_push` is on (or with `--push`), pushes the host
   branch explicitly and treats a rejected push as an error.
-- `pull` fetches and fast-forwards only `host/<name>`; divergence is an error.
+- `pull` fetches and fast-forwards only `host/<name>`; divergence is an error,
+  and it refuses to run over changes that `sync` has not committed yet.
 - `init` creates `host/<name>` directly, keeps existing global settings and
   remembers `--path` and `--system` in `[global] repo_path`.
 - `add`, `remove`, `status`, `diff` and `restore` take several paths;
@@ -92,6 +95,7 @@ need `confect migrate`. See "Upgrading from 1.x" in the guide.
 
 ### Removed
 
+- Every `-r` short option: write `--remote`, `--restore` or `--repo`.
 - `remove --delete`, `sync --all-hosts`, `restore <category> -f <file>` (use
   `restore <paths> -c <category>`), `restore --force` (use `--yes`) and
   `category delete --remove-files` (now the default).

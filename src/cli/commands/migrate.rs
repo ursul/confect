@@ -126,7 +126,10 @@ pub fn run(explicit_repo: Option<&Path>, yes: bool) -> Result<()> {
         indexed
     ));
 
-    let findings = audit::scan_tree(repo.path());
+    let findings: Vec<_> = audit::scan_tree(repo.path(), Some(&categories))
+        .into_iter()
+        .filter(|f| !f.allowed)
+        .collect();
     if !findings.is_empty() {
         println!();
         ui::warn(&format!(

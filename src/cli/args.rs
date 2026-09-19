@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[command(propagate_version = true)]
 pub struct Cli {
     /// Repository to use instead of the configured one
-    #[arg(short, long, global = true, env = "CONFECT_REPO", value_name = "PATH")]
+    #[arg(long, global = true, env = "CONFECT_REPO", value_name = "PATH")]
     pub repo: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -58,7 +58,7 @@ pub enum Commands {
         #[arg(short, long)]
         diff: bool,
 
-        /// Exit with status 2 when anything differs (for monitoring)
+        /// Exit with status 3 when anything differs (for monitoring)
         #[arg(long)]
         exit_code: bool,
     },
@@ -112,7 +112,7 @@ pub enum Commands {
 
     /// Fast-forward this host's branch from the remote
     Pull {
-        /// Restore the pulled files afterwards
+        /// Restore the pulled files afterwards, keeping backups of overwritten files
         #[arg(long)]
         restore: bool,
 

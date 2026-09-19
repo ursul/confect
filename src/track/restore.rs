@@ -112,18 +112,13 @@ pub fn restore(items: &[RestoreItem], store: &Store, backup: bool) -> RestoreRep
     }
 
     for item in &others {
-        let result = (|| -> Result<()> {
-            if backup && item.state == RestoreState::Overwrite {
-                if let Some(saved) = make_backup(&item.path, &stamp)? {
-                    report.backups.push(saved);
-                }
-            }
-            match item.meta.kind {
-                Kind::Symlink => restore_symlink(item, store, &mut report.warnings),
-                Kind::File => restore_file(item, store, &mut report.warnings),
-                Kind::Dir => Ok(()),
-            }
-        })();
+        let backup_stamp =
+            (backup && item.state == RestoreState::Overwrite).then_some(stamp.as_str());
+        let result = match item.meta.kind {
+            Kind::Symlink => restore_symlink(item, store, backup_stamp, &mut report),
+            Kind::File => restore_file(item, store, backup_stamp, &mut report),
+            Kind::Dir => Ok(()),
+        };
         match result {
             Ok(()) => report.restored += 1,
             Err(err) => report.failures.push((item.path.clone(), err.to_string())),
@@ -176,7 +171,27 @@ fn refuse_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn restore_file(item: &RestoreItem, store: &Store, warnings: &mut Vec<String>) -> Result<()> {
+/// Keep a copy of what is about to be replaced; called once the new content is ready.
+fn backup_before_replace(
+    path: &Path,
+    stamp: Option<&str>,
+    report: &mut RestoreReport,
+) -> Result<()> {
+    if let Some(stamp) = stamp {
+        if let Some(saved) = make_backup(path, stamp)? {
+            report.backups.push(saved);
+        }
+    }
+    Ok(())
+}
+
+fn restore_file(
+    item: &RestoreItem,
+    store: &Store,
+    backup: Option<&str>,
+    report: &mut RestoreReport,
+) -> Result<()> {
+    let warnings = &mut report.warnings;
     refuse_directory(&item.path)?;
     let parent = parent_of(&item.path)?;
     let mut temp = tempfile::Builder::new()
@@ -206,17 +221,24 @@ fn restore_file(item: &RestoreItem, store: &Store, warnings: &mut Vec<String>) -
             .at(&item.path)?;
     }
     temp.as_file().sync_all().at(&item.path)?;
+    backup_before_replace(&item.path, backup, report)?;
     temp.persist(&item.path)
         .map_err(|e| ConfectError::io_at(&item.path, e.error))?;
     Ok(())
 }
 
-fn restore_symlink(item: &RestoreItem, store: &Store, warnings: &mut Vec<String>) -> Result<()> {
+fn restore_symlink(
+    item: &RestoreItem,
+    store: &Store,
+    backup: Option<&str>,
+    report: &mut RestoreReport,
+) -> Result<()> {
     refuse_directory(&item.path)?;
     let parent = parent_of(&item.path)?;
     let target = store.read_link(&item.path, &item.meta)?;
     let temp = unique_link(parent, &target)?;
-    let result = chown_nofollow(&temp, &item.meta, warnings)
+    let result = chown_nofollow(&temp, &item.meta, &mut report.warnings)
+        .and_then(|_| backup_before_replace(&item.path, backup, report))
         .and_then(|_| fs::rename(&temp, &item.path).at(&item.path));
     if result.is_err() {
         let _ = fs::remove_file(&temp);

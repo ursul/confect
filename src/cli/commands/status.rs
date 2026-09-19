@@ -30,7 +30,11 @@ pub fn run(
     ui::print_warnings(&plan.warnings);
 
     if plan.changes.is_empty() && plan.secrets.is_empty() {
-        ui::success("The system matches the repository.");
+        if plan.warnings.is_empty() {
+            ui::success("The system matches the repository.");
+        } else {
+            ui::info("No differences in the paths that could be read; see the warnings above.");
+        }
         return Ok(false);
     }
 
@@ -39,7 +43,8 @@ pub fn run(
         println!();
     }
 
-    for change in ui::visible_changes(&plan.changes) {
+    let visible = ui::visible_changes(&plan.changes);
+    for change in &visible {
         println!("  {}", ui::change_line(change));
         if show_diff {
             if let Some(text) = diff::render(&ctx, change) {
@@ -52,7 +57,7 @@ pub fn run(
     println!();
     println!(
         "{} change(s). A added, M modified, P permissions/owner, D deleted, X no longer tracked.",
-        plan.changes.len()
+        visible.len()
     );
     println!(
         "Run {} to record them or {} to undo them.",

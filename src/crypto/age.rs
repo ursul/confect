@@ -20,8 +20,8 @@ type Recipients = Vec<Box<dyn age::Recipient + Send>>;
 pub struct Crypto {
     identity_file: PathBuf,
     recipients_file: PathBuf,
-    identities: OnceCell<Option<Identities>>,
-    recipients: OnceCell<Option<Recipients>>,
+    identities: OnceCell<std::result::Result<Option<Identities>, String>>,
+    recipients: OnceCell<std::result::Result<Option<Recipients>, String>>,
 }
 
 impl Crypto {
@@ -43,39 +43,57 @@ impl Crypto {
     }
 
     pub fn has_identity(&self) -> bool {
-        self.load_identities().is_some()
+        matches!(self.load_identities(), Ok(Some(_)))
     }
 
-    fn load_identities(&self) -> Option<&Identities> {
+    /// `Ok(None)` when there is no identity file; an error when it exists but is unusable.
+    fn load_identities(&self) -> std::result::Result<Option<&Identities>, String> {
         self.identities
             .get_or_init(|| {
                 if !self.identity_file.exists() {
-                    return None;
+                    return Ok(None);
                 }
                 age::IdentityFile::from_file(self.identity_file.to_string_lossy().into_owned())
-                    .ok()?
+                    .map_err(|e| format!("{}: {}", self.identity_file.display(), e))?
                     .into_identities()
-                    .ok()
+                    .map(Some)
+                    .map_err(|e| format!("{}: {}", self.identity_file.display(), e))
             })
             .as_ref()
+            .map(Option::as_ref)
+            .map_err(Clone::clone)
     }
 
     fn load_recipients(&self) -> Result<&Recipients> {
         let loaded = self.recipients.get_or_init(|| {
-            let content = fs::read_to_string(&self.recipients_file).ok()?;
+            let content = match fs::read_to_string(&self.recipients_file) {
+                Ok(content) => content,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(format!("{}: {}", self.recipients_file.display(), err)),
+            };
             let mut recipients: Recipients = Vec::new();
-            for line in content.lines().map(str::trim) {
+            for (number, line) in content.lines().enumerate() {
+                let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let recipient = age::x25519::Recipient::from_str(line).ok()?;
+                let recipient = age::x25519::Recipient::from_str(line).map_err(|e| {
+                    format!(
+                        "{} line {}: not an age recipient (age1...): {}",
+                        self.recipients_file.display(),
+                        number + 1,
+                        e
+                    )
+                })?;
                 recipients.push(Box::new(recipient));
             }
-            (!recipients.is_empty()).then_some(recipients)
+            Ok((!recipients.is_empty()).then_some(recipients))
         });
-        loaded
-            .as_ref()
-            .ok_or_else(|| ConfectError::NoRecipients(self.recipients_file.clone()))
+        match loaded {
+            Ok(Some(recipients)) => Ok(recipients),
+            Ok(None) => Err(ConfectError::NoRecipients(self.recipients_file.clone())),
+            Err(message) => Err(ConfectError::Encryption(message.clone())),
+        }
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -97,9 +115,11 @@ impl Crypto {
 
     /// Decrypt binary or ASCII-armored age data; `path` is only used in messages.
     pub fn decrypt(&self, ciphertext: &[u8], path: &Path) -> Result<Vec<u8>> {
-        let identities = self
-            .load_identities()
-            .ok_or_else(|| ConfectError::NoIdentity(self.identity_file.clone()))?;
+        let identities = match self.load_identities() {
+            Ok(Some(identities)) => identities,
+            Ok(None) => return Err(ConfectError::NoIdentity(self.identity_file.clone())),
+            Err(message) => return Err(ConfectError::Encryption(message)),
+        };
         let fail = |message: String| ConfectError::Decryption {
             path: path.to_path_buf(),
             message,
@@ -204,6 +224,15 @@ mod tests {
             std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn a_bad_recipient_line_is_reported_with_its_number() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("rcpt.txt"), "# keys\nssh-ed25519 AAAA\n").unwrap();
+        let crypto = Crypto::new(dir.path().join("id.txt"), dir.path().join("rcpt.txt"));
+        let err = crypto.encrypt(b"x").unwrap_err().to_string();
+        assert!(err.contains("line 2"), "{}", err);
     }
 
     #[test]

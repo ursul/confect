@@ -28,6 +28,7 @@ pub const HISTORY_NEEDLES: &[&str] = &[
     ":$5$",
     ":$6$",
     ":$y$",
+    ":$7$",
     ":{SHA}",
 ];
 
