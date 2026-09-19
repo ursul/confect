@@ -13,7 +13,7 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/installation' },
-      { text: 'Commands', link: '/commands/init' },
+      { text: 'Commands', link: '/commands/' },
       { text: 'GitHub', link: 'https://github.com/ursul/confect' }
     ],
 
@@ -25,7 +25,8 @@ export default defineConfig({
             { text: 'Installation', link: '/guide/installation' },
             { text: 'Quick Start', link: '/guide/quick-start' },
             { text: 'Configuration', link: '/guide/configuration' },
-            { text: 'Categories', link: '/guide/categories' }
+            { text: 'Categories', link: '/guide/categories' },
+            { text: 'Upgrading from 1.x', link: '/guide/migration' }
           ]
         }
       ],
@@ -33,16 +34,23 @@ export default defineConfig({
         {
           text: 'Commands',
           items: [
+            { text: 'Overview', link: '/commands/' },
             { text: 'init', link: '/commands/init' },
             { text: 'add', link: '/commands/add' },
             { text: 'remove', link: '/commands/remove' },
-            { text: 'sync', link: '/commands/sync' },
-            { text: 'pull', link: '/commands/pull' },
-            { text: 'restore', link: '/commands/restore' },
             { text: 'status', link: '/commands/status' },
+            { text: 'diff', link: '/commands/diff' },
+            { text: 'sync', link: '/commands/sync' },
+            { text: 'restore', link: '/commands/restore' },
+            { text: 'pull', link: '/commands/pull' },
+            { text: 'push', link: '/commands/push' },
             { text: 'category', link: '/commands/category' },
+            { text: 'audit', link: '/commands/audit' },
+            { text: 'key', link: '/commands/key' },
+            { text: 'migrate', link: '/commands/migrate' },
             { text: 'info', link: '/commands/info' },
-            { text: 'diff', link: '/commands/diff' }
+            { text: 'setup-timer', link: '/commands/setup-timer' },
+            { text: 'self-update', link: '/commands/self-update' }
           ]
         }
       ],
@@ -50,8 +58,8 @@ export default defineConfig({
         {
           text: 'Advanced',
           items: [
-            { text: 'Encryption', link: '/advanced/encryption' },
-            { text: 'Multi-host Setup', link: '/advanced/multi-host' },
+            { text: 'Secrets and Encryption', link: '/advanced/encryption' },
+            { text: 'Multiple Hosts', link: '/advanced/multi-host' },
             { text: 'Systemd Timer', link: '/advanced/systemd' }
           ]
         }

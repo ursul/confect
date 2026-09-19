@@ -1,66 +1,86 @@
-# Multi-host Setup
+# Multiple Hosts
 
-confect supports managing configurations across multiple machines using per-host branches.
-
-## How it works
-
-Each host gets its own branch:
+One remote repository can hold the configuration of many machines. Each host writes only its
+own branch:
 
 ```
-main                  # Shared base configs
-├── host/laptop       # Laptop-specific
-├── host/desktop      # Desktop-specific
-└── host/server       # Server-specific
+git@git.example.com:ops/configs.git
+├── host/web1
+├── host/web2
+└── host/db1
 ```
 
-## Setup
+A branch is the complete history of one machine. confect never merges branches and has no
+shared base branch: `sync` and `push` update `host/<name>`, and `pull` fetches nothing else.
 
-### First machine
+## Add a host
+
+On the new machine, clone the shared remote under the new host's name:
 
 ```bash
-confect init --remote git@github.com:user/configs.git
-confect add ~/.bashrc
-confect sync
+sudo -i
+confect init --system --from git@git.example.com:ops/configs.git --host web2
 ```
 
-### Additional machines
+```
+✓ The remote has no branch host/web2 yet; started it empty
+```
+
+Then track its files and sync as usual; the first `sync` creates `host/web2` on the remote.
+`init --remote` on a fresh repository works too: its first push creates the branch.
+
+## Rebuild a host
+
+After a reinstall, or on replacement hardware, restore the old host's branch:
 
 ```bash
-# Initialize (creates new host branch)
-confect init --remote git@github.com:user/configs.git
-
-# Pull shared configs from main
-confect pull
-
-# Add machine-specific configs
-confect add ~/.config/machine-specific
-confect sync
+sudo -i
+mkdir -p ~/.config/confect
+cp /media/backup/age-identity.txt /media/backup/age-recipients.txt ~/.config/confect/
+confect init --system --from git@git.example.com:ops/configs.git --host web1
+confect restore --dry-run
+confect restore --yes --backup
+confect status
 ```
 
-## Branch structure
+- Copy the age files first if the host has encrypted files ([Secrets and Encryption](/advanced/encryption)).
+- Preview with `restore --dry-run`. `status` compares in the other direction: tracked
+  directories that do not exist on the new system at all are only reported as warnings.
+- `restore` sets the recorded mode and owner. Owners are matched by name, so install the
+  packages that create service users (`www-data`, `postgres`, ...) before restoring.
+- Continue with `sync` as before; the history continues on the same branch.
 
-confect automatically:
-- Creates a `host/<hostname>` branch on init
-- Checks out the host branch for your machine
-- Commits changes to the host branch
+## Compare with another host
 
-## Sharing configs between hosts
-
-Common configs can be stored on `main` and merged into host branches:
+A clone made with `init --from` has the other hosts' branches as `origin/host/<name>`. Plain
+git shows their files:
 
 ```bash
-git checkout main
-# Add shared configs
-git checkout host/laptop
-git merge main
+cd /var/lib/confect
+git fetch origin
+git show origin/host/web1:nginx/etc/nginx/sites-enabled/default
+git diff origin/host/web1 HEAD -- nginx/etc/nginx/nginx.conf
 ```
 
-## Host detection
+Copy what you need to the system yourself; confect only restores files of its own branch.
 
-confect uses the system hostname by default. Override with:
+## When the same branch moves elsewhere
 
-```toml
-# ~/.config/confect/config.toml
-[hosts]
-current = "my-custom-name"
+Normally only one machine writes a host branch. If it was changed from another clone, bring
+the local repository up to date before making changes:
+
+```bash
+confect pull             # update the repository only
+confect pull --restore   # and write the pulled files to the system
 ```
+
+`pull` only fast-forwards. If both sides have new commits, it stops and you resolve the
+divergence with git in the repository. `sync` also refuses to overwrite the remote: a rejected
+push is an error.
+
+## Host names
+
+The host name comes from `--host` or the hostname at `init` time and is stored in the
+repository. Renaming the machine later does not switch branches. Use `--host` whenever the
+hostname is not a good branch name, or when you rebuild a machine that got a different
+hostname.

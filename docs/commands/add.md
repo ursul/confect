@@ -1,62 +1,64 @@
 # add
 
-Add files or directories to confect tracking.
+Start tracking files or directories.
 
 ## Usage
 
 ```bash
-confect add [OPTIONS] <PATH>...
+confect add [OPTIONS] --category <CATEGORY> <PATHS>...
 ```
-
-## Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `<PATH>` | File or directory to track |
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
-| `--encrypt`, `-e` | Encrypt the file before storing |
-| `--category <NAME>`, `-c` | Add to a specific category |
-| `--force`, `-f` | Overwrite if already tracked |
+| `-c`, `--category <NAME>` | Category to add the paths to (required) |
+| `--create-category` | Create the category if it does not exist |
+| `-e`, `--encrypt` | Store the files encrypted with age |
 
 ## Examples
 
-### Add a single file
-
 ```bash
-confect add ~/.bashrc
+confect add /etc/nginx -c nginx --create-category
+confect add /etc/ssh/sshd_config /etc/fstab /etc/hosts -c base
+confect add /etc/wireguard -c vpn --create-category --encrypt
 ```
 
-### Add a directory
+## What it does
 
-```bash
-confect add ~/.config/nvim
+Each path is added to the category's `paths`; with `--encrypt` also to its `encrypt`
+patterns. Then confect copies the files into the repository right away and prints them:
+
+```
+✓ Tracking 3 path(s) in category 'base'
+  A /etc/fstab
+  A /etc/hosts
+  A /etc/ssh/sshd_config
+
+Run confect sync to commit.
 ```
 
-### Add with encryption
+The commit is made by the next [`sync`](/commands/sync).
+
+- A directory is tracked with everything below it, including files created later.
+- Symlinks are tracked as symlinks; their targets are not followed.
+- Mode, owner and group are recorded for files, directories and symlinks.
+- `--encrypt` needs the recipients file; run [`confect key generate`](/commands/key) first.
+
+## Refusals
+
+`add` changes nothing when:
+
+- the path does not exist;
+- the category does not exist and `--create-category` is missing;
+- the path is already covered by a category, overlaps one, or is excluded in one;
+- the path is one of the [locations that are never tracked](/guide/categories#what-is-never-tracked)
+  as a whole, such as `/usr`, `/var` or `/home`, or lies inside the repository;
+- a file would be stored as a plaintext secret. Add an `encrypt` or `exclude` pattern
+  first, for example by creating the category yourself:
 
 ```bash
-confect add --encrypt ~/.ssh/config
+confect category create nginx --path /etc/nginx --encrypt '*.key'
 ```
 
-### Add to a category
-
-```bash
-confect add --category shell ~/.zshrc
-```
-
-## How it works
-
-1. Copies the file to the repository
-2. Records metadata (permissions, owner, group)
-3. If encrypted, encrypts with your age key
-4. Updates `.confect/metadata.toml`
-
-## Notes
-
-- Symlinks are followed and the target file is copied
-- Empty directories are ignored
-- Binary files work but may not diff well
+For finer control over what a category covers, see [Categories](/guide/categories).
