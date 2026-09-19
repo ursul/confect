@@ -1,159 +1,218 @@
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::Path;
+use std::cell::OnceCell;
+use std::fs;
+use std::io::{BufReader, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
+use age::armor::ArmoredReader;
 use age::secrecy::ExposeSecret;
 
-use crate::error::{ConfectError, Result};
+use crate::error::{ConfectError, IoContext, Result};
 
-/// Age encryption wrapper
-pub struct AgeEncryption {
-    recipients: Vec<age::x25519::Recipient>,
+type Identities = Vec<Box<dyn age::Identity + Send + Sync>>;
+type Recipients = Vec<Box<dyn age::Recipient + Send>>;
+
+/// age encryption with keys loaded on first use.
+///
+/// Recipients are needed only to write encrypted files and the identity only to read
+/// them, so a host with just the recipients file can still sync.
+pub struct Crypto {
+    identity_file: PathBuf,
+    recipients_file: PathBuf,
+    identities: OnceCell<Option<Identities>>,
+    recipients: OnceCell<Option<Recipients>>,
 }
 
-impl AgeEncryption {
-    /// Create new encryption instance with recipients
-    pub fn new(recipient_strings: Vec<String>) -> Result<Self> {
-        let recipients: std::result::Result<Vec<_>, _> = recipient_strings
-            .iter()
-            .filter(|s| !s.is_empty() && !s.starts_with('#'))
-            .map(|s| s.parse::<age::x25519::Recipient>())
-            .collect();
-
-        let recipients = recipients
-            .map_err(|e| ConfectError::Encryption(format!("Invalid recipient: {}", e)))?;
-
-        Ok(Self { recipients })
-    }
-
-    /// Load recipients from a file (one per line)
-    pub fn from_recipients_file(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
-        let recipient_strings: Vec<String> = content
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|s| s.to_string())
-            .collect();
-
-        Self::new(recipient_strings)
-    }
-
-    /// Encrypt a file
-    pub fn encrypt_file(&self, input_path: &Path, output_path: &Path) -> Result<()> {
-        if self.recipients.is_empty() {
-            return Err(ConfectError::Encryption(
-                "No recipients configured".to_string(),
-            ));
+impl Crypto {
+    pub fn new(identity_file: PathBuf, recipients_file: PathBuf) -> Self {
+        Self {
+            identity_file,
+            recipients_file,
+            identities: OnceCell::new(),
+            recipients: OnceCell::new(),
         }
-
-        let mut input = File::open(input_path)?;
-        let mut plaintext = Vec::new();
-        input.read_to_end(&mut plaintext)?;
-
-        let ciphertext = self.encrypt(&plaintext)?;
-
-        let mut output = File::create(output_path)?;
-        output.write_all(&ciphertext)?;
-
-        Ok(())
     }
 
-    /// Decrypt a file
-    pub fn decrypt_file(
-        &self,
-        input_path: &Path,
-        output_path: &Path,
-        identity: &age::x25519::Identity,
-    ) -> Result<()> {
-        let mut input = File::open(input_path)?;
+    pub fn identity_file(&self) -> &Path {
+        &self.identity_file
+    }
+
+    pub fn recipients_file(&self) -> &Path {
+        &self.recipients_file
+    }
+
+    pub fn has_identity(&self) -> bool {
+        self.load_identities().is_some()
+    }
+
+    fn load_identities(&self) -> Option<&Identities> {
+        self.identities
+            .get_or_init(|| {
+                if !self.identity_file.exists() {
+                    return None;
+                }
+                age::IdentityFile::from_file(self.identity_file.to_string_lossy().into_owned())
+                    .ok()?
+                    .into_identities()
+                    .ok()
+            })
+            .as_ref()
+    }
+
+    fn load_recipients(&self) -> Result<&Recipients> {
+        let loaded = self.recipients.get_or_init(|| {
+            let content = fs::read_to_string(&self.recipients_file).ok()?;
+            let mut recipients: Recipients = Vec::new();
+            for line in content.lines().map(str::trim) {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let recipient = age::x25519::Recipient::from_str(line).ok()?;
+                recipients.push(Box::new(recipient));
+            }
+            (!recipients.is_empty()).then_some(recipients)
+        });
+        loaded
+            .as_ref()
+            .ok_or_else(|| ConfectError::NoRecipients(self.recipients_file.clone()))
+    }
+
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let recipients = self.load_recipients()?;
+        let encryptor = age::Encryptor::with_recipients(recipients.iter().map(|r| r.as_ref() as _))
+            .map_err(|e| ConfectError::Encryption(e.to_string()))?;
         let mut ciphertext = Vec::new();
-        input.read_to_end(&mut ciphertext)?;
-
-        let plaintext = self.decrypt(&ciphertext, identity)?;
-
-        let mut output = File::create(output_path)?;
-        output.write_all(&plaintext)?;
-
-        Ok(())
-    }
-
-    /// Encrypt data
-    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let recipients: Vec<Box<dyn age::Recipient + Send>> = self
-            .recipients
-            .iter()
-            .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
-            .collect();
-
-        if recipients.is_empty() {
-            return Err(ConfectError::Encryption(
-                "No valid recipients found".to_string(),
-            ));
-        }
-
-        let encryptor = age::Encryptor::with_recipients(recipients)
-            .ok_or_else(|| ConfectError::Encryption("Failed to create encryptor".to_string()))?;
-
-        let mut encrypted = vec![];
         let mut writer = encryptor
-            .wrap_output(&mut encrypted)
-            .map_err(|e| ConfectError::Encryption(format!("Failed to wrap output: {}", e)))?;
-
+            .wrap_output(&mut ciphertext)
+            .map_err(|e| ConfectError::Encryption(e.to_string()))?;
         writer
             .write_all(plaintext)
-            .map_err(|e| ConfectError::Encryption(format!("Failed to write: {}", e)))?;
-
+            .map_err(|e| ConfectError::Encryption(e.to_string()))?;
         writer
             .finish()
-            .map_err(|e| ConfectError::Encryption(format!("Failed to finish: {}", e)))?;
-
-        Ok(encrypted)
+            .map_err(|e| ConfectError::Encryption(e.to_string()))?;
+        Ok(ciphertext)
     }
 
-    /// Decrypt data
-    fn decrypt(&self, ciphertext: &[u8], identity: &age::x25519::Identity) -> Result<Vec<u8>> {
-        let decryptor = match age::Decryptor::new(ciphertext)
-            .map_err(|e| ConfectError::Decryption(format!("Failed to create decryptor: {}", e)))?
-        {
-            age::Decryptor::Recipients(d) => d,
-            _ => {
-                return Err(ConfectError::Decryption(
-                    "Passphrase-encrypted files not supported".to_string(),
-                ))
-            }
+    /// Decrypt binary or ASCII-armored age data; `path` is only used in messages.
+    pub fn decrypt(&self, ciphertext: &[u8], path: &Path) -> Result<Vec<u8>> {
+        let identities = self
+            .load_identities()
+            .ok_or_else(|| ConfectError::NoIdentity(self.identity_file.clone()))?;
+        let fail = |message: String| ConfectError::Decryption {
+            path: path.to_path_buf(),
+            message,
         };
-
-        let mut decrypted = vec![];
+        let decryptor = age::Decryptor::new(ArmoredReader::new(BufReader::new(ciphertext)))
+            .map_err(|e| fail(e.to_string()))?;
         let mut reader = decryptor
-            .decrypt(std::iter::once(identity as &dyn age::Identity))
-            .map_err(|e| ConfectError::Decryption(format!("Failed to decrypt: {}", e)))?;
-
+            .decrypt(identities.iter().map(|i| i.as_ref() as _))
+            .map_err(|e| fail(e.to_string()))?;
+        let mut plaintext = Vec::new();
         reader
-            .read_to_end(&mut decrypted)
-            .map_err(|e| ConfectError::Decryption(format!("Failed to read: {}", e)))?;
-
-        Ok(decrypted)
+            .read_to_end(&mut plaintext)
+            .map_err(|e| fail(e.to_string()))?;
+        Ok(plaintext)
     }
 
-    /// Check if a file is age-encrypted
-    pub fn is_encrypted(path: &Path) -> bool {
-        if let Ok(mut file) = File::open(path) {
-            let mut header = [0u8; 16];
-            if file.read_exact(&mut header).is_ok() {
-                // Check for age header
-                return header.starts_with(b"age-encryption.");
+    /// Create a new key pair; refuses to overwrite an existing identity.
+    pub fn generate(&self) -> Result<String> {
+        if self.identity_file.exists() {
+            return Err(ConfectError::Other(format!(
+                "{} already exists; remove it first if you really want a new key",
+                self.identity_file.display()
+            )));
+        }
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+
+        if let Some(parent) = self.identity_file.parent() {
+            fs::create_dir_all(parent).at(parent)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&self.identity_file)
+            .at(&self.identity_file)?;
+        writeln!(
+            file,
+            "# created: {}\n# public key: {}\n{}",
+            chrono::Utc::now().to_rfc3339(),
+            recipient,
+            identity.to_string().expose_secret()
+        )
+        .at(&self.identity_file)?;
+
+        if let Some(parent) = self.recipients_file.parent() {
+            fs::create_dir_all(parent).at(parent)?;
+        }
+        let mut recipients = String::new();
+        if let Ok(existing) = fs::read_to_string(&self.recipients_file) {
+            recipients.push_str(&existing);
+            if !recipients.ends_with('\n') && !recipients.is_empty() {
+                recipients.push('\n');
             }
         }
-        false
+        recipients.push_str(&recipient);
+        recipients.push('\n');
+        fs::write(&self.recipients_file, recipients).at(&self.recipients_file)?;
+        Ok(recipient)
     }
 
-    /// Generate a new key pair
-    pub fn generate_keypair() -> (String, String) {
-        let identity = age::x25519::Identity::generate();
-        let recipient = identity.to_public();
-        (
-            identity.to_string().expose_secret().clone(),
-            recipient.to_string(),
-        )
+    /// Public keys encrypted files are written for.
+    pub fn recipients(&self) -> Result<Vec<String>> {
+        let content = fs::read_to_string(&self.recipients_file)
+            .map_err(|_| ConfectError::NoRecipients(self.recipients_file.clone()))?;
+        Ok(content
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect())
+    }
+}
+
+pub fn is_age_file(content: &[u8]) -> bool {
+    content.starts_with(b"age-encryption.org/")
+        || content.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_with_generated_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let crypto = Crypto::new(dir.path().join("id.txt"), dir.path().join("rcpt.txt"));
+        assert!(!crypto.has_identity());
+        crypto.generate().unwrap();
+
+        let crypto = Crypto::new(dir.path().join("id.txt"), dir.path().join("rcpt.txt"));
+        let ciphertext = crypto.encrypt(b"secret").unwrap();
+        assert!(is_age_file(&ciphertext));
+        assert_eq!(
+            crypto.decrypt(&ciphertext, Path::new("x")).unwrap(),
+            b"secret"
+        );
+        let mode = fs::metadata(dir.path().join("id.txt"))
+            .unwrap()
+            .permissions();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn missing_recipients_is_a_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let crypto = Crypto::new(dir.path().join("id.txt"), dir.path().join("rcpt.txt"));
+        assert!(matches!(
+            crypto.encrypt(b"x"),
+            Err(ConfectError::NoRecipients(_))
+        ));
     }
 }

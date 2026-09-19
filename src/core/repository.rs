@@ -1,309 +1,278 @@
-use chrono::Utc;
-use git2::{
-    Cred, CredentialType, FetchOptions, PushOptions, RemoteCallbacks, Repository as Git2Repo,
-    Signature, StatusOptions,
-};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::core::config::{Config, HostEntry, RepoConfig};
-use crate::error::{ConfectError, Result};
+use nix::fcntl::{Flock, FlockArg};
 
-/// Wrapper around git2::Repository with confect-specific functionality
+use crate::core::category::CategoryManager;
+use crate::core::config::{Config, RepoConfig, RepoMeta, REPO_FORMAT_VERSION};
+use crate::core::git::Git;
+use crate::error::{ConfectError, IoContext, Result};
+
+/// An opened confect repository.
 pub struct Repository {
-    git: Git2Repo,
     path: PathBuf,
-    hostname: String,
+    git: Git,
+    config: Config,
+    repo_config: RepoConfig,
+    host: String,
+}
+
+/// Held for the duration of a command that changes the repository.
+pub struct RepoLock {
+    _lock: Flock<fs::File>,
 }
 
 impl Repository {
-    /// Initialize a new confect repository
-    pub fn init(path: &Path, hostname: &str) -> Result<Self> {
-        if path.join(".git").exists() {
-            return Err(ConfectError::AlreadyInitialized(path.to_path_buf()));
+    /// Where the repository lives: `--repo`/`CONFECT_REPO`, then the global config.
+    pub fn resolve_path(explicit: Option<&Path>, config: &Config) -> PathBuf {
+        explicit
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| config.repo_path())
+    }
+
+    /// Open a repository in the current format.
+    pub fn open(explicit: Option<&Path>) -> Result<Self> {
+        let repo = Self::open_any_version(explicit)?;
+        let found = repo.repo_config.repository.version;
+        if found != REPO_FORMAT_VERSION {
+            return Err(ConfectError::UnsupportedRepoVersion {
+                path: repo.path.clone(),
+                found,
+                expected: REPO_FORMAT_VERSION,
+            });
         }
-
-        // Create directory if needed
-        fs::create_dir_all(path)?;
-
-        // Initialize git repository
-        let git = Git2Repo::init(path)?;
-
-        // Create .confect directory structure
-        let confect_dir = path.join(".confect");
-        fs::create_dir_all(&confect_dir)?;
-
-        // Create initial repo config
-        let mut repo_config = RepoConfig::default();
-        repo_config.repository.created = Some(Utc::now().to_rfc3339());
-        repo_config.hosts.list.insert(
-            hostname.to_string(),
-            HostEntry {
-                branch: format!("host/{}", hostname),
-            },
-        );
-        repo_config.save(path)?;
-
-        // Create empty categories file
-        fs::write(confect_dir.join("categories.toml"), "[categories]\n")?;
-
-        // Create empty metadata file
-        fs::write(confect_dir.join("metadata.toml"), "[files]\n")?;
-
-        // Create .gitignore
-        fs::write(path.join(".gitignore"), "*.confect-backup\n")?;
-
-        let repo = Self {
-            git,
-            path: path.to_path_buf(),
-            hostname: hostname.to_string(),
-        };
-
-        // Create initial commit on main branch
-        repo.commit_all("Initialize confect repository")?;
-
-        // Create and switch to host branch
-        repo.create_host_branch(hostname)?;
-
         Ok(repo)
     }
 
-    /// Open an existing repository
-    pub fn open(path: &Path) -> Result<Self> {
-        if !path.join(".git").exists() {
-            return Err(ConfectError::NotInitialized);
+    /// Open a repository of any format version (for `migrate` and `info`).
+    pub fn open_any_version(explicit: Option<&Path>) -> Result<Self> {
+        let config = Config::load()?;
+        let path = Self::resolve_path(explicit, &config);
+        if !path.join(".git").exists() || !path.join(".confect").exists() {
+            return Err(ConfectError::NotInitialized(path));
         }
-
-        if !path.join(".confect").exists() {
-            return Err(ConfectError::NotInitialized);
-        }
-
-        let git = Git2Repo::open(path)?;
-
-        // Get hostname from global config
-        let global_config = Config::load_global()?;
-        let hostname = global_config.hosts.current.unwrap_or_else(|| {
-            hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".to_string())
-        });
-
+        let git = Git::new(&path, config.global.network_timeout);
+        let repo_config = RepoConfig::load(&path)?;
+        let host = resolve_host(&repo_config, &git, &config)?;
         Ok(Self {
+            path,
             git,
-            path: path.to_path_buf(),
-            hostname,
+            config,
+            repo_config,
+            host,
         })
     }
 
-    /// Open the default repository
-    pub fn open_default() -> Result<Self> {
-        let config = Config::load_global()?;
-        let path = config.repo_path();
-        Self::open(&path)
+    /// Create a new repository with the host branch checked out.
+    pub fn create(path: &Path, host: &str) -> Result<Self> {
+        validate_host(host)?;
+        if path.join(".git").exists() {
+            return Err(ConfectError::AlreadyInitialized(path.to_path_buf()));
+        }
+        create_private_dir(path)?;
+        let config = Config::load()?;
+        let git = Git::init(path, &branch_for(host))?;
+        let git = Git::new(git.dir(), config.global.network_timeout);
+        let repo_config = new_repo_config(host);
+        write_skeleton(path, &repo_config)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            git,
+            config,
+            repo_config,
+            host: host.to_string(),
+        })
     }
 
-    /// Get repository path
+    /// Clone an existing configuration repository and switch to this host's branch,
+    /// starting the branch from scratch when the remote does not have it yet.
+    pub fn clone_from(url: &str, path: &Path, host: &str) -> Result<(Self, bool)> {
+        validate_host(host)?;
+        if path.join(".git").exists() {
+            return Err(ConfectError::AlreadyInitialized(path.to_path_buf()));
+        }
+        if path.exists() && fs::read_dir(path).at(path)?.next().is_some() {
+            return Err(ConfectError::InvalidPath {
+                path: path.to_path_buf(),
+                reason: "the directory is not empty".into(),
+            });
+        }
+        let config = Config::load()?;
+        let remote = config.global.default_remote.clone();
+        create_private_dir(path)?;
+        let git = Git::clone_bare_checkout(url, path, &remote, config.global.network_timeout)?;
+        let branch = branch_for(host);
+        let existing = git.remote_has_branch(&remote, &branch)?;
+        let repo_config = if existing {
+            git.checkout_tracking(&remote, &branch)?;
+            RepoConfig::load(path)?
+        } else {
+            git.switch_orphan(&branch)?;
+            let repo_config = new_repo_config(host);
+            write_skeleton(path, &repo_config)?;
+            repo_config
+        };
+        let repo = Self {
+            path: path.to_path_buf(),
+            git,
+            config,
+            repo_config,
+            host: host.to_string(),
+        };
+        Ok((repo, existing))
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Get current hostname
-    pub fn current_host(&self) -> Result<&str> {
-        Ok(&self.hostname)
+    pub fn git(&self) -> &Git {
+        &self.git
     }
 
-    /// Create a branch for a host
-    fn create_host_branch(&self, hostname: &str) -> Result<()> {
-        let branch_name = format!("host/{}", hostname);
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
 
-        // Get HEAD commit
-        let head = self.git.head()?;
-        let commit = head.peel_to_commit()?;
+    pub fn repo_config(&self) -> &RepoConfig {
+        &self.repo_config
+    }
 
-        // Create branch
-        self.git.branch(&branch_name, &commit, false)?;
-
-        // Checkout the branch
-        let refname = format!("refs/heads/{}", branch_name);
-        let obj = self.git.revparse_single(&refname)?;
-        self.git.checkout_tree(&obj, None)?;
-        self.git.set_head(&refname)?;
-
+    pub fn set_repo_config(&mut self, repo_config: RepoConfig) -> Result<()> {
+        repo_config.save(&self.path)?;
+        self.repo_config = repo_config;
         Ok(())
     }
 
-    /// Add a remote
-    pub fn add_remote(&self, name: &str, url: &str) -> Result<()> {
-        self.git.remote(name, url)?;
-        Ok(())
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
-    /// Check if remote exists
-    pub fn has_remote(&self, name: &str) -> Result<bool> {
-        Ok(self.git.find_remote(name).is_ok())
+    pub fn branch(&self) -> String {
+        branch_for(&self.host)
     }
 
-    /// List remotes
-    pub fn list_remotes(&self) -> Result<Vec<(String, String)>> {
-        let remotes = self.git.remotes()?;
-        let mut result = Vec::new();
+    pub fn remote(&self) -> &str {
+        &self.config.global.default_remote
+    }
 
-        for remote_name in remotes.iter().flatten() {
-            if let Ok(remote) = self.git.find_remote(remote_name) {
-                let url = remote.url().unwrap_or("").to_string();
-                result.push((remote_name.to_string(), url));
+    pub fn categories(&self) -> Result<CategoryManager> {
+        CategoryManager::load(&self.path)
+    }
+
+    /// Exclusive lock against concurrent confect runs on this repository.
+    pub fn lock(&self) -> Result<RepoLock> {
+        let lock_path = self.path.join(".git").join("confect.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .at(&lock_path)?;
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(RepoLock { _lock: lock }),
+            Err((file, nix::errno::Errno::EWOULDBLOCK)) => {
+                eprintln!("Waiting for another confect process to finish...");
+                Flock::lock(file, FlockArg::LockExclusive)
+                    .map(|lock| RepoLock { _lock: lock })
+                    .map_err(|(_, errno)| ConfectError::Unix(errno))
             }
+            Err((_, errno)) => Err(ConfectError::Unix(errno)),
         }
-
-        Ok(result)
     }
 
-    /// Stage all changes and commit
-    pub fn commit_all(&self, message: &str) -> Result<()> {
-        let mut index = self.git.index()?;
-
-        // Add all files
-        index.add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)?;
-        index.write()?;
-
-        let tree_id = index.write_tree()?;
-        let tree = self.git.find_tree(tree_id)?;
-
-        let sig = self.signature()?;
-
-        // Get parent commit if exists
-        let parent_commit = self.git.head().ok().and_then(|h| h.peel_to_commit().ok());
-
-        match parent_commit {
-            Some(parent) => {
-                self.git
-                    .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
-            }
-            None => {
-                self.git
-                    .commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
-            }
+    /// Repository directories must not be readable by other users: git objects are
+    /// world-readable by default and keep every past version of every file.
+    pub fn ensure_private(&self) -> Result<bool> {
+        let meta = fs::metadata(&self.path).at(&self.path)?;
+        if meta.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o700)).at(&self.path)?;
+            return Ok(true);
         }
-
-        Ok(())
-    }
-
-    /// Push to remote
-    pub fn push(&self, remote_name: &str) -> Result<()> {
-        let mut remote = self.git.find_remote(remote_name)?;
-
-        let head = self.git.head()?;
-        let branch_name = head
-            .shorthand()
-            .ok_or_else(|| ConfectError::Other("Could not get branch name".to_string()))?;
-
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name);
-
-        let callbacks = create_credentials_callback();
-        let mut push_options = PushOptions::new();
-        push_options.remote_callbacks(callbacks);
-
-        remote.push(&[&refspec], Some(&mut push_options))?;
-
-        Ok(())
-    }
-
-    /// Pull from remote
-    pub fn pull(&self, remote_name: &str) -> Result<()> {
-        let mut remote = self.git.find_remote(remote_name)?;
-
-        // Fetch with credentials
-        let callbacks = create_credentials_callback();
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(callbacks);
-
-        remote.fetch(&[] as &[&str], Some(&mut fetch_options), None)?;
-
-        // Get current branch
-        let head = self.git.head()?;
-        let branch_name = head.shorthand().unwrap_or("main");
-
-        // Merge (fast-forward only)
-        let fetch_head = self.git.find_reference("FETCH_HEAD")?;
-        let fetch_commit = self.git.reference_to_annotated_commit(&fetch_head)?;
-
-        let (analysis, _) = self.git.merge_analysis(&[&fetch_commit])?;
-
-        if analysis.is_fast_forward() {
-            let refname = format!("refs/heads/{}", branch_name);
-            let mut reference = self.git.find_reference(&refname)?;
-            reference.set_target(fetch_commit.id(), "Fast-forward")?;
-            self.git
-                .checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-        }
-
-        Ok(())
-    }
-
-    /// Get repository status
-    pub fn status(&self) -> Result<Vec<(PathBuf, git2::Status)>> {
-        let mut opts = StatusOptions::new();
-        opts.include_untracked(true);
-
-        let statuses = self.git.statuses(Some(&mut opts))?;
-
-        let mut result = Vec::new();
-        for entry in statuses.iter() {
-            if let Some(path) = entry.path() {
-                result.push((PathBuf::from(path), entry.status()));
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Check if there are uncommitted changes
-    pub fn has_changes(&self) -> Result<bool> {
-        let status = self.status()?;
-        Ok(!status.is_empty())
-    }
-
-    /// Get git signature for commits
-    fn signature(&self) -> Result<Signature<'_>> {
-        // Try to get from git config, fall back to defaults
-        let config = self.git.config()?;
-
-        let name = config
-            .get_string("user.name")
-            .unwrap_or_else(|_| "confect".to_string());
-        let email = config
-            .get_string("user.email")
-            .unwrap_or_else(|_| "confect@localhost".to_string());
-
-        Ok(Signature::now(&name, &email)?)
+        Ok(false)
     }
 }
 
-/// Create RemoteCallbacks with authentication support
-fn create_credentials_callback<'a>() -> RemoteCallbacks<'a> {
-    let mut callbacks = RemoteCallbacks::new();
+pub fn branch_for(host: &str) -> String {
+    format!("host/{}", host)
+}
 
-    callbacks.credentials(|url, username_from_url, allowed_types| {
-        // Try SSH agent first
-        if allowed_types.contains(CredentialType::SSH_KEY) {
-            let username = username_from_url.unwrap_or("git");
-            return Cred::ssh_key_from_agent(username);
+pub fn validate_host(host: &str) -> Result<()> {
+    let valid = !host.is_empty()
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with('.')
+        && !host.contains("..")
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfectError::InvalidHostName(host.to_string()))
+    }
+}
+
+pub fn default_host() -> String {
+    hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn resolve_host(repo_config: &RepoConfig, git: &Git, config: &Config) -> Result<String> {
+    if let Some(host) = &repo_config.repository.host {
+        return Ok(host.clone());
+    }
+    if let Some(branch) = git.current_branch()? {
+        if let Some(host) = branch.strip_prefix("host/") {
+            return Ok(host.to_string());
         }
+    }
+    Ok(config.hosts.current.clone().unwrap_or_else(default_host))
+}
 
-        // Try git credential helper for HTTPS
-        if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
-            if let Ok(config) = git2::Config::open_default() {
-                return Cred::credential_helper(&config, url, username_from_url);
-            }
-        }
+fn new_repo_config(host: &str) -> RepoConfig {
+    RepoConfig {
+        repository: RepoMeta {
+            version: REPO_FORMAT_VERSION,
+            created: Some(chrono::Utc::now().to_rfc3339()),
+            host: Some(host.to_string()),
+        },
+    }
+}
 
-        // Default (anonymous)
-        if allowed_types.contains(CredentialType::DEFAULT) {
-            return Cred::default();
-        }
+fn write_skeleton(path: &Path, repo_config: &RepoConfig) -> Result<()> {
+    let confect_dir = path.join(".confect");
+    fs::create_dir_all(&confect_dir).at(&confect_dir)?;
+    repo_config.save(path)?;
+    let categories = confect_dir.join("categories.toml");
+    if !categories.exists() {
+        fs::write(&categories, "[categories]\n").at(&categories)?;
+    }
+    let metadata = confect_dir.join("metadata.toml");
+    if !metadata.exists() {
+        fs::write(&metadata, "version = 2\n\n[entries]\n").at(&metadata)?;
+    }
+    Ok(())
+}
 
-        Err(git2::Error::from_str("no authentication method available"))
-    });
+fn create_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).at(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).at(path)?;
+    Ok(())
+}
 
-    callbacks
+#[cfg(test)]
+mod tests {
+    use super::validate_host;
+
+    #[test]
+    fn host_names_are_validated() {
+        assert!(validate_host("s1.servers.ylkino.ru").is_ok());
+        assert!(validate_host("TREMENDOUS").is_ok());
+        assert!(validate_host("bad host").is_err());
+        assert!(validate_host("a..b").is_err());
+        assert!(validate_host("").is_err());
+        assert!(validate_host("-x").is_err());
+    }
 }

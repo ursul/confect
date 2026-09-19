@@ -1,330 +1,311 @@
-use glob::Pattern;
+use glob::{MatchOptions, Pattern};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::core::Repository;
-use crate::error::{ConfectError, Result};
+use crate::core::paths::{glob_base, has_glob};
+use crate::error::{ConfectError, IoContext, Result};
 
-/// A category groups related configuration files together
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const MATCH_OPTIONS: MatchOptions = MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
+
+/// A category groups related configuration files together.
+///
+/// All pattern lists share one syntax: an absolute path covers itself and everything
+/// below it, an absolute glob covers what it matches and everything below that, and a
+/// pattern without `/` (such as `*.pem`) matches a file or directory name at any depth.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Category {
+    #[serde(skip)]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Glob patterns for files in this category
     #[serde(default)]
     pub paths: Vec<String>,
-    /// Glob patterns for files that should be encrypted
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub encrypt: Vec<String>,
-    /// Exclusion patterns
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+    /// Files the secret guard lets through in plaintext on purpose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_plaintext: Vec<String>,
 }
 
 impl Category {
-    /// Create a new category
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            description: None,
-            paths: Vec::new(),
-            encrypt: Vec::new(),
-            exclude: Vec::new(),
+            ..Self::default()
         }
     }
 
-    /// Check if a path matches this category
+    /// Whether the path lies inside one of the category's paths (ignoring exclusions).
+    pub fn covers(&self, path: &Path) -> bool {
+        self.paths.iter().any(|p| pattern_covers(p, path))
+    }
+
+    pub fn is_excluded(&self, path: &Path) -> bool {
+        self.exclude.iter().any(|p| pattern_covers(p, path))
+    }
+
+    /// Whether the path belongs to this category.
     pub fn matches(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-
-        // Check exclusions first
-        for pattern in &self.exclude {
-            if pattern_covers_path(pattern, path, &path_str) {
-                return false;
-            }
-        }
-
-        // Check if path matches any pattern
-        for pattern in &self.paths {
-            if pattern_covers_path(pattern, path, &path_str) {
-                return true;
-            }
-        }
-
-        false
+        self.covers(path) && !self.is_excluded(path)
     }
 
-    /// Check if a file should be encrypted
     pub fn should_encrypt(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-
-        for pattern in &self.encrypt {
-            if let Ok(p) = Pattern::new(pattern) {
-                if p.matches(&path_str) {
-                    return true;
-                }
-            }
-        }
-
-        false
+        self.encrypt.iter().any(|p| pattern_covers(p, path))
     }
 
-    /// Get the repository path for a system path
-    pub fn repo_path_for(&self, system_path: &Path) -> PathBuf {
-        // category_name/etc/nginx/nginx.conf
-        let path_str = system_path.to_string_lossy();
-        let relative = path_str.trim_start_matches('/');
-        PathBuf::from(&self.name).join(relative)
+    pub fn allows_plaintext(&self, path: &Path) -> bool {
+        self.allow_plaintext.iter().any(|p| pattern_covers(p, path))
     }
 
-    /// Get the system path from a repository path
-    pub fn system_path_for(&self, repo_path: &Path) -> Option<PathBuf> {
-        // Strip category prefix and add leading /
-        let components: Vec<_> = repo_path.components().collect();
-        if components.is_empty() {
-            return None;
-        }
-
-        // Skip the category name (first component)
-        let rest: PathBuf = components.into_iter().skip(1).collect();
-        if rest.as_os_str().is_empty() {
-            return None;
-        }
-
-        Some(PathBuf::from("/").join(rest))
+    /// Length of the most specific path pattern covering `path`, for tie-breaking.
+    fn specificity(&self, path: &Path) -> usize {
+        self.paths
+            .iter()
+            .filter(|p| pattern_covers(p, path))
+            .map(|p| glob_base(p).as_os_str().len())
+            .max()
+            .unwrap_or(0)
     }
 }
 
-fn pattern_covers_path(pattern: &str, path: &Path, path_str: &str) -> bool {
-    if has_glob_metachar(pattern) {
-        return Pattern::new(pattern)
-            .map(|p| p.matches(path_str))
-            .unwrap_or(false);
+/// Does `pattern` cover `path`, either directly or through an ancestor directory?
+pub fn pattern_covers(pattern: &str, path: &Path) -> bool {
+    if !pattern.contains('/') {
+        let Ok(p) = Pattern::new(pattern) else {
+            return false;
+        };
+        return path.iter().any(|name| {
+            name.to_str()
+                .map(|n| p.matches_with(n, MATCH_OPTIONS))
+                .unwrap_or(false)
+        });
     }
 
-    let pattern_path = Path::new(pattern);
-    path == pattern_path || path.starts_with(pattern_path)
-}
-
-fn has_glob_metachar(pattern: &str) -> bool {
-    pattern
-        .chars()
-        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Category;
-    use std::path::Path;
-
-    #[test]
-    fn exact_directory_path_matches_children() {
-        let mut category = Category::new("nginx");
-        category.paths.push("/etc/nginx".to_string());
-
-        assert!(category.matches(Path::new("/etc/nginx")));
-        assert!(category.matches(Path::new("/etc/nginx/nginx.conf")));
-        assert!(category.matches(Path::new("/etc/nginx/sites-enabled/default")));
-        assert!(!category.matches(Path::new("/etc/nginx-old/nginx.conf")));
+    if !has_glob(pattern) {
+        return path.starts_with(pattern);
     }
 
-    #[test]
-    fn exact_excluded_directory_path_excludes_children() {
-        let mut category = Category::new("nginx");
-        category.paths.push("/etc/nginx".to_string());
-        category.exclude.push("/etc/nginx/cache".to_string());
+    let Ok(p) = Pattern::new(pattern) else {
+        return false;
+    };
+    path.ancestors().any(|ancestor| {
+        ancestor
+            .to_str()
+            .map(|a| p.matches_with(a, MATCH_OPTIONS))
+            .unwrap_or(false)
+    })
+}
 
-        assert!(category.matches(Path::new("/etc/nginx/nginx.conf")));
-        assert!(!category.matches(Path::new("/etc/nginx/cache/state.db")));
+pub fn validate_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfectError::InvalidCategoryName(name.to_string()))
     }
 }
 
-/// Categories file structure
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct CategoriesFile {
     #[serde(default)]
-    categories: HashMap<String, CategoryData>,
+    categories: BTreeMap<String, Category>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CategoryData {
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    paths: Vec<String>,
-    #[serde(default)]
-    encrypt: Vec<String>,
-    #[serde(default)]
-    exclude: Vec<String>,
-}
-
-impl From<&Category> for CategoryData {
-    fn from(cat: &Category) -> Self {
-        Self {
-            description: cat.description.clone(),
-            paths: cat.paths.clone(),
-            encrypt: cat.encrypt.clone(),
-            exclude: cat.exclude.clone(),
-        }
-    }
-}
-
-/// Manages categories for a repository
+/// Categories of a repository (`.confect/categories.toml`), kept sorted on disk.
 pub struct CategoryManager {
-    categories: HashMap<String, Category>,
-    repo_path: PathBuf,
+    categories: BTreeMap<String, Category>,
+    file: PathBuf,
 }
 
 impl CategoryManager {
-    /// Load categories from repository
-    pub fn load(repo: &Repository) -> Result<Self> {
-        let repo_path = repo.path().to_path_buf();
-        let categories_file = repo_path.join(".confect").join("categories.toml");
-
-        let categories = if categories_file.exists() {
-            let content = fs::read_to_string(&categories_file)?;
-            let file: CategoriesFile = toml::from_str(&content)?;
-
-            file.categories
-                .into_iter()
-                .map(|(name, data)| {
-                    let cat = Category {
-                        name: name.clone(),
-                        description: data.description,
-                        paths: data.paths,
-                        encrypt: data.encrypt,
-                        exclude: data.exclude,
-                    };
-                    (name, cat)
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        };
-
-        Ok(Self {
-            categories,
-            repo_path,
-        })
+    pub fn file(repo_path: &Path) -> PathBuf {
+        repo_path.join(".confect").join("categories.toml")
     }
 
-    /// Save categories to repository
-    pub fn save(&self) -> Result<()> {
-        let confect_dir = self.repo_path.join(".confect");
-        fs::create_dir_all(&confect_dir)?;
-
-        let categories_file = confect_dir.join("categories.toml");
-
-        let file = CategoriesFile {
-            categories: self
-                .categories
-                .iter()
-                .map(|(name, cat)| (name.clone(), CategoryData::from(cat)))
-                .collect(),
+    pub fn load(repo_path: &Path) -> Result<Self> {
+        let file = Self::file(repo_path);
+        let mut categories = if file.exists() {
+            let content = fs::read_to_string(&file).at(&file)?;
+            toml::from_str::<CategoriesFile>(&content)?.categories
+        } else {
+            BTreeMap::new()
         };
+        for (name, category) in categories.iter_mut() {
+            category.name = name.clone();
+        }
+        Ok(Self { categories, file })
+    }
 
-        let content = toml::to_string_pretty(&file)?;
-        fs::write(&categories_file, content)?;
+    pub fn save(&self) -> Result<()> {
+        if let Some(parent) = self.file.parent() {
+            fs::create_dir_all(parent).at(parent)?;
+        }
+        let content = toml::to_string_pretty(&CategoriesFile {
+            categories: self.categories.clone(),
+        })?;
+        fs::write(&self.file, content).at(&self.file)?;
         Ok(())
     }
 
-    /// List all categories
-    pub fn list(&self) -> Vec<&Category> {
-        self.categories.values().collect()
+    pub fn list(&self) -> impl Iterator<Item = &Category> {
+        self.categories.values()
     }
 
-    /// Check if category exists
+    pub fn names(&self) -> Vec<String> {
+        self.categories.keys().cloned().collect()
+    }
+
     pub fn exists(&self, name: &str) -> bool {
         self.categories.contains_key(name)
     }
 
-    /// Get category by name
     pub fn get(&self, name: &str) -> Result<&Category> {
         self.categories
             .get(name)
             .ok_or_else(|| ConfectError::CategoryNotFound(name.to_string()))
     }
 
-    /// Get mutable category by name
     pub fn get_mut(&mut self, name: &str) -> Result<&mut Category> {
         self.categories
             .get_mut(name)
             .ok_or_else(|| ConfectError::CategoryNotFound(name.to_string()))
     }
 
-    /// Add a new category
-    pub fn add(&mut self, category: Category) -> Result<()> {
-        if self.categories.contains_key(&category.name) {
-            return Err(ConfectError::CategoryAlreadyExists(category.name.clone()));
+    pub fn create(&mut self, name: &str, description: Option<String>) -> Result<&mut Category> {
+        validate_name(name)?;
+        if self.categories.contains_key(name) {
+            return Err(ConfectError::CategoryAlreadyExists(name.to_string()));
         }
-        self.categories.insert(category.name.clone(), category);
-        Ok(())
+        let mut category = Category::new(name);
+        category.description = description;
+        Ok(self.categories.entry(name.to_string()).or_insert(category))
     }
 
-    /// Create a new category with paths
-    pub fn create(
-        &mut self,
-        name: &str,
-        description: Option<String>,
-        paths: Vec<String>,
-    ) -> Result<()> {
-        let cat = Category {
-            name: name.to_string(),
-            description,
-            paths,
-            encrypt: Vec::new(),
-            exclude: Vec::new(),
-        };
-        self.add(cat)
+    pub fn remove(&mut self, name: &str) -> Result<Category> {
+        self.categories
+            .remove(name)
+            .ok_or_else(|| ConfectError::CategoryNotFound(name.to_string()))
     }
 
-    /// Remove a category
-    pub fn remove(&mut self, name: &str) -> Result<()> {
-        if self.categories.remove(name).is_none() {
-            return Err(ConfectError::CategoryNotFound(name.to_string()));
-        }
-        Ok(())
-    }
-
-    /// Find category for a given path
+    /// The category a path belongs to; the most specific one wins for legacy overlaps.
     pub fn find_for_path(&self, path: &Path) -> Option<&Category> {
-        self.categories.values().find(|cat| cat.matches(path))
+        self.categories
+            .values()
+            .filter(|c| c.matches(path))
+            .max_by_key(|c| c.specificity(path))
     }
 
-    /// Check if any category contains a path
-    pub fn contains_path(&self, category_name: &str, path: &Path) -> bool {
-        if let Some(cat) = self.categories.get(category_name) {
-            cat.matches(path)
-        } else {
-            false
-        }
+    /// The category whose paths cover `path`, even if it excludes it.
+    pub fn find_covering(&self, path: &Path) -> Option<&Category> {
+        self.categories
+            .values()
+            .filter(|c| c.covers(path))
+            .max_by_key(|c| c.specificity(path))
     }
 
-    /// Add a path to an existing category
-    pub fn add_path(&mut self, name: &str, path: String, encrypt: bool) -> Result<()> {
-        let cat = self.get_mut(name)?;
-
-        if !cat.paths.contains(&path) {
-            cat.paths.push(path.clone());
+    /// Refuse a new path pattern that would put files into two categories or track
+    /// them twice in one.
+    pub fn check_overlap(&self, pattern: &str) -> Result<()> {
+        let base = glob_base(pattern);
+        for category in self.categories.values() {
+            for existing in &category.paths {
+                let overlaps = pattern_covers(existing, &base)
+                    || pattern_covers(pattern, &glob_base(existing));
+                if overlaps {
+                    return Err(ConfectError::OverlappingPath {
+                        path: PathBuf::from(pattern),
+                        other: existing.clone(),
+                        category: category.name.clone(),
+                    });
+                }
+            }
         }
-
-        if encrypt && !cat.encrypt.contains(&path) {
-            cat.encrypt.push(path);
-        }
-
         Ok(())
     }
+}
 
-    /// Remove a path from a category
-    pub fn remove_path(&mut self, name: &str, path: &str) -> Result<()> {
-        let cat = self.get_mut(name)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        cat.paths.retain(|p| p != path);
-        cat.encrypt.retain(|p| p != path);
+    fn category(paths: &[&str], exclude: &[&str]) -> Category {
+        Category {
+            name: "c".into(),
+            paths: paths.iter().map(|s| s.to_string()).collect(),
+            exclude: exclude.iter().map(|s| s.to_string()).collect(),
+            ..Category::default()
+        }
+    }
 
-        Ok(())
+    #[test]
+    fn directory_path_covers_children_only() {
+        let c = category(&["/etc/nginx"], &[]);
+        assert!(c.matches(Path::new("/etc/nginx")));
+        assert!(c.matches(Path::new("/etc/nginx/sites-enabled/default")));
+        assert!(!c.matches(Path::new("/etc/nginx-old/nginx.conf")));
+    }
+
+    #[test]
+    fn excluded_files_and_directories_are_not_matched() {
+        let c = category(
+            &["/etc/app"],
+            &["/etc/app/cache", "/etc/app/secret.key", "*.pem"],
+        );
+        assert!(c.matches(Path::new("/etc/app/app.conf")));
+        assert!(!c.matches(Path::new("/etc/app/cache/state.db")));
+        assert!(!c.matches(Path::new("/etc/app/secret.key")));
+        assert!(!c.matches(Path::new("/etc/app/tls/server.pem")));
+    }
+
+    #[test]
+    fn globs_do_not_cross_directory_separators() {
+        let c = category(&["/etc/nginx/*.conf"], &[]);
+        assert!(c.matches(Path::new("/etc/nginx/nginx.conf")));
+        assert!(!c.matches(Path::new("/etc/nginx/conf.d/site.conf")));
+    }
+
+    #[test]
+    fn glob_matching_a_directory_covers_its_content() {
+        let c = category(&["/etc/letsencrypt/renewal*"], &[]);
+        assert!(c.matches(Path::new("/etc/letsencrypt/renewal/site.conf")));
+        assert!(c.matches(Path::new("/etc/letsencrypt/renewal-hooks/deploy/x")));
+        assert!(!c.matches(Path::new("/etc/letsencrypt/archive/site/privkey1.pem")));
+    }
+
+    #[test]
+    fn overlapping_paths_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = CategoryManager::load(dir.path()).unwrap();
+        manager
+            .create("web", None)
+            .unwrap()
+            .paths
+            .push("/etc/nginx".into());
+        assert!(manager.check_overlap("/etc/nginx/nginx.conf").is_err());
+        assert!(manager.check_overlap("/etc").is_err());
+        assert!(manager.check_overlap("/etc/nginx").is_err());
+        assert!(manager.check_overlap("/etc/ssh").is_ok());
+        assert!(manager.check_overlap("/etc/*.conf").is_ok());
+    }
+
+    #[test]
+    fn category_names_are_validated() {
+        assert!(validate_name("runtime").is_ok());
+        assert!(validate_name("my_cat-1.x").is_ok());
+        assert!(validate_name(".confect").is_err());
+        assert!(validate_name("a/b").is_err());
+        assert!(validate_name("").is_err());
     }
 }

@@ -1,46 +1,67 @@
 use console::style;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::core::{CategoryManager, Repository};
-use crate::error::Result;
-use crate::fs::FileTracker;
+use crate::cli::context::Ctx;
+use crate::cli::ui;
+use crate::core::paths::absolute;
+use crate::error::{ConfectError, Result};
+use crate::track::plan::Scope;
 
-pub fn run_remove(path: PathBuf, delete: bool) -> Result<()> {
-    let repo = Repository::open_default()?;
-    let mut categories = CategoryManager::load(&repo)?;
-    let tracker = FileTracker::new(&repo);
+/// Untrack paths: a category path is removed from the category, a path inside a tracked
+/// directory is excluded. Stored copies are dropped either way.
+pub fn run(explicit_repo: Option<&Path>, paths: Vec<PathBuf>) -> Result<()> {
+    let mut ctx = Ctx::open(explicit_repo)?;
+    let _lock = ctx.repo.lock()?;
 
-    // Canonicalize path if it exists, otherwise use as-is
-    let path = path.canonicalize().unwrap_or(path);
+    let mut scope_paths = Vec::new();
+    let mut touched = Vec::new();
+    for path in paths {
+        let path = absolute(&path)?;
+        let pattern = path.to_string_lossy().into_owned();
 
-    // Find which category this file belongs to
-    let category_name = categories.find_for_path(&path).map(|c| c.name.clone());
-
-    // Remove from tracker
-    let removed_files = tracker.remove(&path, delete)?;
-
-    // Update category
-    if let Some(name) = category_name {
-        categories.remove_path(&name, path.to_string_lossy().as_ref())?;
-        categories.save()?;
-    }
-
-    println!();
-    println!(
-        "{} Removed {} file(s) from tracking{}:",
-        style("✓").green().bold(),
-        removed_files.len(),
-        if delete {
-            " and deleted from repository"
+        let owner = ctx
+            .categories
+            .list()
+            .find(|c| c.paths.contains(&pattern))
+            .map(|c| c.name.clone());
+        if let Some(name) = owner {
+            let cat = ctx.categories.get_mut(&name)?;
+            cat.paths.retain(|p| p != &pattern);
+            cat.encrypt.retain(|p| p != &pattern);
+            cat.allow_plaintext.retain(|p| p != &pattern);
+            println!(
+                "  {} {} (removed from '{}')",
+                style("-").red(),
+                path.display(),
+                name
+            );
+            touched.push(name);
+        } else if let Some(name) = ctx.categories.find_for_path(&path).map(|c| c.name.clone()) {
+            ctx.categories.get_mut(&name)?.exclude.push(pattern);
+            println!(
+                "  {} {} (excluded in '{}')",
+                style("-").red(),
+                path.display(),
+                name
+            );
+            touched.push(name);
         } else {
-            ""
+            return Err(ConfectError::PathNotTracked(path));
         }
-    );
-    for file in &removed_files {
-        println!("  {} {}", style("-").red(), file.display());
+        scope_paths.push(path);
     }
-    println!();
-    println!("Run {} to commit changes.", style("confect sync").cyan());
 
+    let mut dropped = 0;
+    touched.sort();
+    touched.dedup();
+    for name in touched {
+        let plan = ctx.commit_category_change(&Scope {
+            category: Some(name),
+            paths: scope_paths.clone(),
+        })?;
+        dropped += plan.changes.len();
+    }
+    ui::success(&format!("Dropped {} stored path(s)", dropped));
+    println!("Run {} to commit.", style("confect sync").cyan());
     Ok(())
 }

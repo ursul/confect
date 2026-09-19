@@ -1,142 +1,100 @@
 use console::style;
+use std::collections::BTreeMap;
+use std::path::Path;
 
-use crate::core::Repository;
-use crate::error::{ConfectError, Result};
-use crate::fs::{FileTracker, MetadataStore};
+use crate::cli::context::{guard_secrets, report_failures, Ctx};
+use crate::cli::ui;
+use crate::error::Result;
+use crate::track::plan::{self, Scope};
+use crate::track::Store;
 
-pub fn run_sync(message: Option<String>, no_push: bool, _all_hosts: bool) -> Result<()> {
-    let repo = Repository::open_default()?;
-    let tracker = FileTracker::new(&repo);
+pub fn run(
+    explicit_repo: Option<&Path>,
+    message: Option<String>,
+    no_push: bool,
+    force_push: bool,
+) -> Result<()> {
+    let mut ctx = Ctx::open(explicit_repo)?;
+    let _lock = ctx.repo.lock()?;
 
-    println!("{} Checking for changes...", style("[1/4]").bold().dim());
-
-    // Refresh files from system to repository
-    let refreshed = tracker.refresh_all()?;
-
-    // Check if there are any git changes (including untracked files from `add`)
-    let has_git_changes = repo.has_changes()?;
-
-    if refreshed.is_empty() && !has_git_changes {
-        if !no_push && repo.has_remote("origin")? {
-            println!("{} No local changes to commit", style("[2/4]").bold().dim());
-            println!("{} Pushing to remote...", style("[3/4]").bold().dim());
-            repo.push("origin")?;
-            println!("{} Pushed to origin", style("✓").green());
-            println!();
-            println!("{} Sync completed successfully!", style("✓").green().bold());
-            return Ok(());
-        }
-
-        return Err(ConfectError::NoChanges);
+    if ctx.repo.ensure_private()? {
+        ui::warn(&format!(
+            "{} was readable by other users; set it to 0700",
+            ctx.repo.path().display()
+        ));
     }
 
-    // Count changes for message
-    let change_count = if refreshed.is_empty() {
-        // Count from git status
-        repo.status()?.len()
-    } else {
-        refreshed.len()
+    let plan = ctx.plan(&Scope::default())?;
+    ui::print_warnings(&plan.warnings);
+    guard_secrets(&plan)?;
+
+    let failures = {
+        let store = Store::new(ctx.repo.path(), &ctx.crypto);
+        plan::apply(&plan, &store, &mut ctx.metadata)?
     };
+    ctx.metadata.save()?;
+    report_failures(&failures)?;
 
-    println!(
-        "{} Staging {} file(s)",
-        style("[2/4]").bold().dim(),
-        change_count
-    );
-
-    // Update metadata for refreshed files
-    if !refreshed.is_empty() {
-        let mut metadata = MetadataStore::load(&repo)?;
-        for path in &refreshed.updated {
-            metadata.update_from_system(path)?;
-        }
-        for path in &refreshed.deleted {
-            metadata.remove(path);
-        }
-        metadata.save()?;
-    }
-
-    // Generate commit message
-    let commit_message = message.unwrap_or_else(|| {
-        if !refreshed.is_empty() {
-            // Refreshed files - group by category
-            let categories: Vec<_> = refreshed
-                .paths()
-                .filter_map(|p| tracker.get_category(p).ok())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-
-            if categories.len() == 1 {
-                format!("Sync {} ({} files)", categories[0], refreshed.len())
-            } else {
-                format!(
-                    "Sync {} files across {} categories",
-                    refreshed.len(),
-                    categories.len()
-                )
-            }
-        } else {
-            // New files from git status - extract categories from paths
-            let git_status = repo.status().unwrap_or_default();
-            let mut category_counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-
-            for (path, _) in &git_status {
-                // Category is the first path component (e.g., "nginx/etc/..." → "nginx")
-                if let Some(cat) = path.components().next() {
-                    let cat_name = cat.as_os_str().to_string_lossy().to_string();
-                    // Skip .confect directory
-                    if !cat_name.starts_with('.') {
-                        *category_counts.entry(cat_name).or_insert(0) += 1;
-                    }
-                }
-            }
-
-            if category_counts.is_empty() {
-                format!("Add {} files", change_count)
-            } else if category_counts.len() == 1 {
-                let (cat, count) = category_counts.iter().next().unwrap();
-                format!("Add {} ({} files)", cat, count)
-            } else {
-                // Sort by count descending
-                let mut sorted: Vec<_> = category_counts.into_iter().collect();
-                sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-
-                let parts: Vec<_> = sorted
-                    .iter()
-                    .map(|(cat, count)| format!("{} ({})", cat, count))
-                    .collect();
-                format!("Add {}", parts.join(", "))
-            }
-        }
-    });
-
-    println!("{} Creating commit...", style("[3/4]").bold().dim());
-
-    // Commit
-    repo.commit_all(&commit_message)?;
-
-    println!(
-        "{} Committed: {}",
-        style("✓").green(),
-        style(&commit_message).italic()
-    );
-
-    // Push if enabled
-    if !no_push && repo.has_remote("origin")? {
-        println!("{} Pushing to remote...", style("[4/4]").bold().dim());
-        repo.push("origin")?;
-        println!("{} Pushed to origin", style("✓").green());
+    let git = ctx.repo.git();
+    git.add_all()?;
+    if git.has_staged_changes()? {
+        let staged = git.staged()?;
+        let message = message.unwrap_or_else(|| summary(&staged));
+        git.commit(&message, ctx.repo.host())?;
+        ui::success(&format!("Committed: {}", style(&message).italic()));
     } else {
-        println!(
-            "{} Skipping push (no remote or --no-push)",
-            style("[4/4]").bold().dim()
-        );
+        ui::success("Nothing to commit; the repository already matches the system.");
     }
 
-    println!();
-    println!("{} Sync completed successfully!", style("✓").green().bold());
-
+    let push = force_push || (ctx.repo.config().global.auto_push && !no_push);
+    if !push {
+        return Ok(());
+    }
+    let remote = ctx.repo.remote().to_string();
+    if git.remote_url(&remote)?.is_none() {
+        if force_push {
+            return Err(crate::error::ConfectError::Other(format!(
+                "no remote '{}' configured",
+                remote
+            )));
+        }
+        return Ok(());
+    }
+    let outcome = git.push(&remote, &ctx.repo.branch())?;
+    if outcome.up_to_date {
+        ui::success(&format!("{} is up to date", remote));
+    } else {
+        ui::success(&format!("Pushed {} to {}", ctx.repo.branch(), remote));
+    }
     Ok(())
+}
+
+/// Commit message such as "Sync nginx (M2), runtime (A1 D1)", from what git stages.
+fn summary(staged: &[(char, String)]) -> String {
+    let mut per_category: BTreeMap<&str, BTreeMap<char, usize>> = BTreeMap::new();
+    for (letter, path) in staged {
+        let category = path.split('/').next().unwrap_or(path);
+        if category.starts_with('.') {
+            continue;
+        }
+        *per_category
+            .entry(category)
+            .or_default()
+            .entry(*letter)
+            .or_default() += 1;
+    }
+    if per_category.is_empty() {
+        return "Update confect configuration".to_string();
+    }
+    let parts: Vec<String> = per_category
+        .into_iter()
+        .map(|(category, counts)| {
+            let counts: Vec<String> = counts
+                .into_iter()
+                .map(|(letter, count)| format!("{}{}", letter, count))
+                .collect();
+            format!("{} ({})", category, counts.join(" "))
+        })
+        .collect();
+    format!("Sync {}", parts.join(", "))
 }

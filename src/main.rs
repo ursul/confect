@@ -1,180 +1,98 @@
-use anyhow::Result;
 use clap::Parser;
 use console::style;
 
-use confect::cli::commands;
+use confect::cli::commands::{
+    add, audit, category, diff, info, init, key, migrate, remote, remove, restore, self_update,
+    status, sync, timer,
+};
 use confect::cli::{Cli, Commands};
+use confect::Result;
+
+/// Exit status when `status --exit-code` or `audit` found something.
+const EXIT_FOUND: i32 = 2;
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("{} {}", style("Error:").red().bold(), err);
-        std::process::exit(1);
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            eprintln!("{} {}", style("Error:").red().bold(), err);
+            std::process::exit(1);
+        }
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<i32> {
     let cli = Cli::parse();
+    let repo = cli.repo.as_deref();
 
     match cli.command {
-        Commands::Init {
-            path,
-            system,
-            remote,
-            host,
-        } => {
-            commands::run_init(path, system, remote, host)?;
-        }
-
+        Commands::Init(args) => init::run(args, repo)?,
         Commands::Add {
-            path,
+            paths,
             category,
             create_category,
             encrypt,
+        } => add::run(repo, paths, category, create_category, encrypt)?,
+        Commands::Remove { paths } => remove::run(repo, paths)?,
+        Commands::Status {
+            paths,
+            category,
+            diff,
+            exit_code,
         } => {
-            commands::run_add(path, category, create_category, encrypt)?;
+            let differs = status::run(repo, paths, category, diff)?;
+            if exit_code && differs {
+                return Ok(EXIT_FOUND);
+            }
         }
-
-        Commands::Remove { path, delete } => {
-            commands::run_remove(path, delete)?;
-        }
-
-        Commands::Status { category, diff } => {
-            commands::run_status(category, diff)?;
-        }
-
+        Commands::Diff { paths, category } => diff::run(repo, paths, category)?,
         Commands::Sync {
             message,
             no_push,
-            all_hosts,
-        } => {
-            commands::run_sync(message, no_push, all_hosts)?;
-        }
-
+            push,
+        } => sync::run(repo, message, no_push, push)?,
         Commands::Restore {
+            paths,
             category,
-            file,
             dry_run,
-            force,
+            yes,
             backup,
-        } => {
-            commands::run_restore(category, file, dry_run, force, backup)?;
+        } => restore::run(
+            repo,
+            restore::Options {
+                paths,
+                category,
+                dry_run,
+                yes,
+                backup,
+            },
+        )?,
+        Commands::Pull { restore, yes } => remote::pull(repo, restore, yes)?,
+        Commands::Push => remote::push(repo)?,
+        Commands::Category(command) => category::run(repo, command)?,
+        Commands::Audit { history } => {
+            if audit::run(repo, history)? > 0 {
+                return Ok(EXIT_FOUND);
+            }
         }
-
-        Commands::Category(cmd) => {
-            commands::run_category(cmd)?;
-        }
-
-        Commands::Info => {
-            commands::run_info()?;
-        }
-
-        Commands::SetupTimer { schedule, remove } => {
-            setup_timer(&schedule, remove)?;
-        }
-
-        Commands::Pull { restore } => {
-            pull_changes(restore)?;
-        }
-
-        Commands::Diff { category, file } => {
-            commands::run_diff(category, file)?;
-        }
-
-        Commands::SelfUpdate { check } => {
-            commands::run_self_update(check)?;
-        }
+        Commands::Key(command) => key::run(repo, command)?,
+        Commands::Migrate { yes } => migrate::run(repo, yes)?,
+        Commands::Info => info::run(repo)?,
+        Commands::SetupTimer {
+            schedule,
+            message,
+            user,
+            remove,
+        } => timer::run(
+            repo,
+            timer::TimerOptions {
+                schedule,
+                message,
+                user,
+                remove,
+            },
+        )?,
+        Commands::SelfUpdate { check, yes } => self_update::run(check, yes)?,
     }
-
-    Ok(())
-}
-
-fn setup_timer(schedule: &str, remove: bool) -> Result<()> {
-    use std::fs;
-    use std::path::PathBuf;
-
-    let service_path = PathBuf::from("/etc/systemd/system/confect-backup.service");
-    let timer_path = PathBuf::from("/etc/systemd/system/confect-backup.timer");
-
-    if remove {
-        // Remove timer
-        if timer_path.exists() {
-            fs::remove_file(&timer_path)?;
-        }
-        if service_path.exists() {
-            fs::remove_file(&service_path)?;
-        }
-        println!("{} Removed confect-backup timer", style("✓").green());
-        println!("Run: sudo systemctl daemon-reload");
-        return Ok(());
-    }
-
-    // Get confect binary path
-    let confect_path = std::env::current_exe()?;
-
-    // Create service
-    let service_content = format!(
-        r#"[Unit]
-Description=Confect configuration backup
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart={} sync -m "Automatic backup"
-User=root
-
-[Install]
-WantedBy=multi-user.target
-"#,
-        confect_path.display()
-    );
-
-    // Create timer
-    let timer_content = format!(
-        r#"[Unit]
-Description=Timer for confect configuration backup
-
-[Timer]
-OnCalendar={}
-Persistent=true
-RandomizedDelaySec=300
-
-[Install]
-WantedBy=timers.target
-"#,
-        schedule
-    );
-
-    fs::write(&service_path, service_content)?;
-    fs::write(&timer_path, timer_content)?;
-
-    println!("{} Created systemd timer", style("✓").green());
-    println!();
-    println!("To enable the timer, run:");
-    println!("  sudo systemctl daemon-reload");
-    println!("  sudo systemctl enable --now confect-backup.timer");
-    println!();
-    println!("To check timer status:");
-    println!("  systemctl status confect-backup.timer");
-
-    Ok(())
-}
-
-fn pull_changes(restore: bool) -> Result<()> {
-    use confect::core::Repository;
-
-    let repo = Repository::open_default()?;
-
-    println!("{} Pulling from remote...", style("[1/2]").bold().dim());
-
-    repo.pull("origin")?;
-
-    println!("{} Pulled latest changes", style("✓").green());
-
-    if restore {
-        println!("{} Restoring files...", style("[2/2]").bold().dim());
-        commands::run_restore(None, None, false, true, true)?;
-    }
-
-    Ok(())
+    Ok(0)
 }

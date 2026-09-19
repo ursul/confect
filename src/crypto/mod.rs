@@ -1,3 +1,4 @@
 mod age;
+pub mod secrets;
 
-pub use age::AgeEncryption;
+pub use self::age::{is_age_file, Crypto};

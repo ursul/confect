@@ -1,18 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "confect")]
-#[command(author, version, about = "Manage system configuration files with Git")]
+#[command(author, version, about = "Keep system configuration files in Git")]
 #[command(propagate_version = true)]
 pub struct Cli {
-    /// Path to the confect repository
-    #[arg(short, long, env = "CONFECT_REPO")]
+    /// Repository to use instead of the configured one
+    #[arg(short, long, global = true, env = "CONFECT_REPO", value_name = "PATH")]
     pub repo: Option<PathBuf>,
-
-    /// Verbose output
-    #[arg(short, long, global = true)]
-    pub verbose: bool,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -20,207 +16,278 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new confect repository
-    Init {
-        /// Path to create the repository (default: ~/.local/share/confect)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
+    /// Create a repository, or clone an existing one with --from
+    Init(InitArgs),
 
-        /// Use system-wide repository (/var/lib/confect, requires sudo)
-        #[arg(long)]
-        system: bool,
-
-        /// Remote Git URL to use
-        #[arg(short, long)]
-        remote: Option<String>,
-
-        /// Hostname for this machine (default: auto-detect)
-        #[arg(long)]
-        host: Option<String>,
-    },
-
-    /// Add a file or directory to be tracked
+    /// Start tracking files or directories
     Add {
-        /// Path to the file or directory
-        path: PathBuf,
+        /// Paths to track
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
 
-        /// Category to add the file to
+        /// Category to add them to
         #[arg(short, long)]
-        category: Option<String>,
+        category: String,
 
-        /// Create category if it doesn't exist
+        /// Create the category if it does not exist
         #[arg(long)]
         create_category: bool,
 
-        /// Mark this file as containing secrets (will be encrypted)
+        /// Store the files encrypted with age
         #[arg(short, long)]
         encrypt: bool,
     },
 
-    /// Remove a file or directory from tracking
+    /// Stop tracking paths and drop their stored copies
     Remove {
-        /// Path to the file or directory
-        path: PathBuf,
-
-        /// Also delete from the repository (not just untrack)
-        #[arg(long)]
-        delete: bool,
+        /// Paths to untrack
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
     },
 
-    /// Show status of tracked files
+    /// Show how the system differs from the repository
     Status {
-        /// Show only files in this category
+        /// Limit to these paths
+        paths: Vec<PathBuf>,
+
+        /// Limit to one category
         #[arg(short, long)]
         category: Option<String>,
 
-        /// Show detailed diff
+        /// Show content diffs as well
         #[arg(short, long)]
         diff: bool,
+
+        /// Exit with status 2 when anything differs (for monitoring)
+        #[arg(long)]
+        exit_code: bool,
     },
 
-    /// Sync changes to the repository (commit and optionally push)
+    /// Show content differences between the repository and the system
+    Diff {
+        /// Limit to these paths
+        paths: Vec<PathBuf>,
+
+        /// Limit to one category
+        #[arg(short, long)]
+        category: Option<String>,
+    },
+
+    /// Record the system state in the repository, commit and push
     Sync {
         /// Commit message
         #[arg(short, long)]
         message: Option<String>,
 
-        /// Don't push to remote
-        #[arg(long)]
+        /// Do not push, whatever auto_push says
+        #[arg(long, conflicts_with = "push")]
         no_push: bool,
 
-        /// Sync all hosts (requires push access to all branches)
+        /// Push even if auto_push is off
         #[arg(long)]
-        all_hosts: bool,
+        push: bool,
     },
 
-    /// Restore files from the repository to the system
+    /// Write stored files back to the system
     Restore {
-        /// Category to restore (default: all)
+        /// Limit to these paths
+        paths: Vec<PathBuf>,
+
+        /// Limit to one category
+        #[arg(short, long)]
         category: Option<String>,
 
-        /// Specific file to restore
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-
-        /// Show what would be done without making changes
-        #[arg(long)]
+        /// Only show what would change
+        #[arg(short = 'n', long)]
         dry_run: bool,
 
-        /// Don't ask for confirmation
+        /// Do not ask for confirmation
         #[arg(short, long)]
-        force: bool,
+        yes: bool,
 
-        /// Create backup of existing files before restoring
+        /// Keep a timestamped copy of every file that gets overwritten
         #[arg(short, long)]
         backup: bool,
     },
+
+    /// Fast-forward this host's branch from the remote
+    Pull {
+        /// Restore the pulled files afterwards
+        #[arg(long)]
+        restore: bool,
+
+        /// Do not ask for confirmation before restoring
+        #[arg(short, long, requires = "restore")]
+        yes: bool,
+    },
+
+    /// Push this host's branch to the remote
+    Push,
 
     /// Manage categories
     #[command(subcommand)]
     Category(CategoryCommands),
 
+    /// Look for plaintext secrets in the repository
+    Audit {
+        /// Search every commit, not only the current files
+        #[arg(long)]
+        history: bool,
+    },
+
+    /// Manage the age key used for encrypted files
+    #[command(subcommand)]
+    Key(KeyCommands),
+
+    /// Convert a 1.x repository to the current format
+    Migrate {
+        /// Do not ask for confirmation
+        #[arg(short, long)]
+        yes: bool,
+    },
+
     /// Show repository information
     Info,
 
-    /// Set up automatic backup timer (systemd)
+    /// Install a systemd timer that runs 'confect sync'
     SetupTimer {
-        /// Timer schedule (systemd OnCalendar format)
-        #[arg(short, long, default_value = "hourly")]
+        /// OnCalendar schedule
+        #[arg(short, long, default_value = "daily")]
         schedule: String,
 
-        /// Remove the timer instead of creating it
+        /// Commit message used by the timer
+        #[arg(short, long, default_value = "Automatic backup")]
+        message: String,
+
+        /// Install as a user unit (default for non-root users)
+        #[arg(long)]
+        user: bool,
+
+        /// Stop, disable and delete the timer instead
         #[arg(long)]
         remove: bool,
     },
 
-    /// Pull latest changes from remote
-    Pull {
-        /// Also restore files after pulling
-        #[arg(short, long)]
-        restore: bool,
-    },
-
-    /// Show diff between system files and repository
-    Diff {
-        /// Category to diff
-        category: Option<String>,
-
-        /// Specific file to diff
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-    },
-
-    /// Update confect to the latest version
+    /// Update confect from the GitHub release, verifying its checksum
     #[command(name = "self-update")]
     SelfUpdate {
-        /// Check for updates without installing
+        /// Only check whether a newer release exists
         #[arg(long)]
         check: bool,
+
+        /// Do not ask for confirmation
+        #[arg(short, long)]
+        yes: bool,
     },
+}
+
+#[derive(Args)]
+pub struct InitArgs {
+    /// Repository directory (default: ~/.local/share/confect)
+    #[arg(short, long, conflicts_with = "system")]
+    pub path: Option<PathBuf>,
+
+    /// Use the system-wide repository /var/lib/confect
+    #[arg(long)]
+    pub system: bool,
+
+    /// Remote to push to
+    #[arg(long, conflicts_with = "from")]
+    pub remote: Option<String>,
+
+    /// Clone this repository and continue this host's branch in it
+    #[arg(long, value_name = "URL")]
+    pub from: Option<String>,
+
+    /// Host name, which is also the branch name host/<name> (default: hostname)
+    #[arg(long)]
+    pub host: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum CategoryCommands {
-    /// List all categories
+    /// List categories
     List,
 
-    /// Show files in a category
-    Show {
-        /// Category name
-        name: String,
-    },
+    /// Show a category's patterns and files
+    Show { name: String },
 
-    /// Create a new category
+    /// Create a category
     Create {
-        /// Category name
         name: String,
 
-        /// Description of the category
-        #[arg(short, long)]
-        description: Option<String>,
-
-        /// Paths to include (glob patterns supported)
+        /// Paths or patterns to track
         #[arg(short, long, required = true)]
         path: Vec<String>,
 
-        /// Patterns for files that should be encrypted
+        /// Description
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Patterns of files to store encrypted
         #[arg(short, long)]
         encrypt: Vec<String>,
-    },
 
-    /// Delete a category
-    Delete {
-        /// Category name
-        name: String,
+        /// Patterns to leave out
+        #[arg(short = 'x', long)]
+        exclude: Vec<String>,
 
-        /// Don't ask for confirmation
-        #[arg(short, long)]
-        force: bool,
-
-        /// Also remove files from repository
+        /// Patterns the secret guard lets through in plaintext
         #[arg(long)]
-        remove_files: bool,
+        allow_plaintext: Vec<String>,
     },
 
-    /// Add a path to an existing category
-    AddPath {
-        /// Category name
+    /// Delete a category and its stored copies
+    Delete {
         name: String,
 
-        /// Path to add (glob pattern supported)
-        path: String,
-
-        /// Mark as encrypted
+        /// Do not ask for confirmation
         #[arg(short, long)]
-        encrypt: bool,
+        yes: bool,
     },
 
-    /// Remove a path from a category
-    RemovePath {
-        /// Category name
-        name: String,
+    /// Add a path or pattern to a category
+    AddPath { name: String, path: String },
 
-        /// Path to remove
-        path: String,
-    },
+    /// Remove a path or pattern from a category and drop its copies
+    RemovePath { name: String, path: String },
+
+    /// Manage exclusions
+    #[command(subcommand)]
+    Exclude(PatternCommands),
+
+    /// Manage patterns of files stored encrypted
+    #[command(subcommand)]
+    Encrypt(PatternCommands),
+
+    /// Manage patterns the secret guard lets through in plaintext
+    #[command(subcommand, name = "allow-plaintext")]
+    AllowPlaintext(PatternCommands),
+}
+
+#[derive(Subcommand)]
+pub enum PatternCommands {
+    /// Add a pattern
+    Add { name: String, pattern: String },
+    /// Remove a pattern
+    Remove { name: String, pattern: String },
+}
+
+#[derive(Subcommand)]
+pub enum KeyCommands {
+    /// Create the age identity and recipients files
+    Generate,
+    /// Print the recipients encrypted files are written for
+    Show,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
 }

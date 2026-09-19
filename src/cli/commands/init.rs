@@ -1,107 +1,104 @@
 use console::style;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::cli::args::InitArgs;
+use crate::cli::ui;
+use crate::core::config::SYSTEM_REPO_PATH;
+use crate::core::paths::absolute;
+use crate::core::repository::default_host;
 use crate::core::{Config, Repository};
 use crate::error::{ConfectError, Result};
 
-pub fn run_init(
-    path: Option<PathBuf>,
-    system: bool,
-    remote: Option<String>,
-    host: Option<String>,
-) -> Result<()> {
-    let repo_path = if let Some(p) = path {
-        p
-    } else if system {
-        Config::system_repo_path()
-    } else {
-        Config::default_repo_path()
+pub fn run(args: InitArgs, explicit_repo: Option<&Path>) -> Result<()> {
+    let mut config = Config::load()?;
+    let path = match (&args.path, args.system, explicit_repo) {
+        (Some(path), _, _) => absolute(path)?,
+        (None, true, _) => PathBuf::from(SYSTEM_REPO_PATH),
+        (None, false, Some(path)) => absolute(path)?,
+        (None, false, None) => config.repo_path(),
     };
-    let hostname = host.unwrap_or_else(|| {
-        hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string())
-    });
+    let host = args.host.clone().unwrap_or_else(default_host);
 
-    let git_dir = repo_path.join(".git");
-    let confect_dir = repo_path.join(".confect");
+    if path.join(".git").exists() {
+        return add_remote_to_existing(&path, args.remote.as_deref());
+    }
 
-    if git_dir.exists() {
-        if let Some(url) = remote.as_ref() {
-            if !confect_dir.exists() {
-                return Err(ConfectError::AlreadyInitialized(repo_path));
-            }
-
-            println!(
-                "{} Repository already initialized at {}",
-                style("[1/2]").bold().dim(),
-                style(repo_path.display()).cyan()
-            );
-
-            let repo = Repository::open(&repo_path)?;
-            if repo.has_remote("origin")? {
-                println!(
-                    "{} Remote origin already configured (use 'git remote set-url origin <url>' to change)",
-                    style("[2/2]").bold().dim()
-                );
-            } else {
-                repo.add_remote("origin", url)?;
-                println!(
-                    "{} Added remote origin: {}",
-                    style("[2/2]").bold().dim(),
-                    style(url).cyan()
-                );
-            }
-
-            return Ok(());
+    let repo = if let Some(url) = &args.from {
+        println!(
+            "Cloning {} into {}",
+            style(url).cyan(),
+            style(path.display()).cyan()
+        );
+        let (repo, existing) = Repository::clone_from(url, &path, &host)?;
+        if existing {
+            ui::success(&format!(
+                "Checked out branch {} from the remote",
+                style(repo.branch()).green()
+            ));
+        } else {
+            repo.git().add_all()?;
+            repo.git()
+                .commit(&format!("Start configuration of {}", host), &host)?;
+            ui::success(&format!(
+                "The remote has no branch {} yet; started it empty",
+                style(repo.branch()).green()
+            ));
         }
-
-        return Err(ConfectError::AlreadyInitialized(repo_path));
-    }
-
-    println!(
-        "{} Initializing confect repository at {}",
-        style("[1/3]").bold().dim(),
-        style(repo_path.display()).cyan()
-    );
-
-    // Create repository
-    let repo = Repository::init(&repo_path, &hostname)?;
-
-    println!(
-        "{} Created branch {}",
-        style("[2/3]").bold().dim(),
-        style(format!("host/{}", hostname)).green()
-    );
-
-    // Set up remote if provided
-    if let Some(url) = remote.as_ref() {
-        repo.add_remote("origin", url)?;
-        println!(
-            "{} Added remote origin: {}",
-            style("[3/3]").bold().dim(),
-            style(url).cyan()
-        );
+        repo
     } else {
-        println!(
-            "{} No remote configured (use 'git remote add origin <url>' later)",
-            style("[3/3]").bold().dim()
-        );
+        let repo = Repository::create(&path, &host)?;
+        repo.git().add_all()?;
+        repo.git().commit(
+            &format!("Initialize confect repository for {}", host),
+            &host,
+        )?;
+        if let Some(url) = &args.remote {
+            repo.git().add_remote(repo.remote(), url)?;
+        }
+        ui::success(&format!(
+            "Created repository at {} on branch {}",
+            style(path.display()).cyan(),
+            style(repo.branch()).green()
+        ));
+        repo
+    };
+
+    if path != Config::default_repo_path() {
+        config.global.repo_path = Some(path.clone());
     }
+    config.save()?;
 
-    // Create global config
-    Config::init_global(&hostname)?;
-
-    println!();
-    println!(
-        "{} Repository initialized successfully!",
-        style("✓").green().bold()
-    );
+    if let Some((name, url)) = repo.git().remotes()?.into_iter().next() {
+        println!("Remote {}: {}", style(name).cyan(), url);
+    }
     println!();
     println!("Next steps:");
-    println!("  1. Add files:     confect add /etc/nginx --category nginx");
-    println!("  2. Sync changes:  confect sync -m \"Initial commit\"");
-    println!("  3. View status:   confect status");
+    if args.from.is_some() {
+        println!("  confect status               # compare the stored files with this system");
+        println!("  confect restore              # write them to this system");
+    } else {
+        println!("  confect add /etc/nginx -c nginx --create-category");
+        println!("  confect sync -m \"Initial configuration\"");
+    }
+    Ok(())
+}
 
+fn add_remote_to_existing(path: &Path, remote: Option<&str>) -> Result<()> {
+    let Some(url) = remote else {
+        return Err(ConfectError::AlreadyInitialized(path.to_path_buf()));
+    };
+    let repo = Repository::open_any_version(Some(path))?;
+    let name = repo.remote().to_string();
+    if let Some(existing) = repo.git().remote_url(&name)? {
+        return Err(ConfectError::Other(format!(
+            "remote {} already points to {}; change it with: git -C {} remote set-url {} <url>",
+            name,
+            existing,
+            path.display(),
+            name
+        )));
+    }
+    repo.git().add_remote(&name, url)?;
+    ui::success(&format!("Added remote {}: {}", name, url));
     Ok(())
 }
