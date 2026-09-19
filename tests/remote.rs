@@ -113,6 +113,8 @@ fn pull_fast_forwards_only_this_hosts_branch() {
     stranger.ok(&["init", "--from", remote.to_str().unwrap(), "--host", "aaa"]);
     stranger.ok(&["sync"]);
 
+    // add + sync leave nothing uncommitted, so the dirty-tree check lets pull through.
+    assert!(env.git(&env.repo(), &["status", "--porcelain"]).trim().is_empty());
     let out = env.ok(&["pull"]);
     assert!(out.contains("Fast-forwarded"), "{}", out);
     let stored = fs::read_to_string(env.stored("app", &env.sys_path("etc/app/app.conf"))).unwrap();

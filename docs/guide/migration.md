@@ -170,3 +170,9 @@ Other behaviour that changed:
 - Directories are tracked with their permissions, including empty ones.
 - `sync` refuses to store plaintext private keys and password hashes.
 - Nothing is merged between host branches; there is no shared `main` branch workflow.
+
+## Restoring on another machine
+
+`migrate` records owners and groups by name. When a migrated repository is restored on a
+machine where some of those users or groups do not exist, `restore` warns for each such file
+and leaves it owned by whoever runs the restore; create the accounts first to avoid that.

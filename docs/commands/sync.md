@@ -45,6 +45,8 @@ confect sync --no-push
 
 4. Writes new and changed files into the repository, encrypting those that match `encrypt`
    patterns, drops deleted and no longer tracked ones, and updates `.confect/metadata.toml`.
+   A stored encrypted copy that cannot be decrypted is kept and reported; `--reencrypt`
+   replaces every encrypted copy from the system instead.
 5. Commits everything, if anything changed.
 6. Pushes the host branch when `auto_push` is on (or `--push` is given) and the remote
    exists.

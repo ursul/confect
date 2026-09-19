@@ -49,7 +49,8 @@ Paths that already match are skipped. With `--dry-run`, confect stops after the 
 - Parent directories are opened one by one without following symlinks. A symlink on the way
   is followed only when root or the user running `restore` owns it (merged-`/usr` links such
   as `/lib` are owned by root); a link planted by another user makes that path fail instead
-  of redirecting a write made as root.
+  of redirecting a write made as root. Links owned by root are trusted: confect cannot tell a
+  merged-`/usr` link from one another root process created.
 - A directory where a file should be is not replaced; that path fails.
 - Directories are created as needed; their mode and owner are applied last.
 - Owners are looked up by name, so files keep the right owner on a machine where the IDs
